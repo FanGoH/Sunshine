@@ -776,7 +776,7 @@ namespace config {
     {},  // encoder
     {},  // adapter_name
     {},  // output_name
-    {},  // dual_display_source
+    "virtual",  // dual_display_source
 
     {
       video_t::dd_t::config_option_e::disabled,  // configuration_option
