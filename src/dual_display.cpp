@@ -1402,7 +1402,7 @@ namespace dual_display {
     }
 #elif defined(__linux__)
     /**
-     * @brief A compositor virtual output owned by `krfb-virtualmonitor`.
+     * @brief A compositor virtual output owned by `sunshine-ds-virtual-output`.
      *
      * KWin virtual monitors exist only in the compositor, so KMS cannot see
      * them. Capture must use `capture = kwin`. Destroying the lease sends
@@ -1425,7 +1425,7 @@ namespace dual_display {
 
         BOOST_LOG(info) << "Second display: removing KWin virtual output "sv << m_name;
         if (kill(m_pid, SIGTERM) != 0 && errno != ESRCH) {
-          BOOST_LOG(warning) << "Failed to stop krfb-virtualmonitor: "sv << strerror(errno);
+          BOOST_LOG(warning) << "Failed to stop virtual-output helper: "sv << strerror(errno);
         }
 
         const auto deadline = std::chrono::steady_clock::now() + 3s;
@@ -1449,20 +1449,14 @@ namespace dual_display {
       }
 
     private:
-      pid_t m_pid;  ///< krfb-virtualmonitor child, or -1 after reaping.
+      pid_t m_pid;  ///< Virtual-output helper child, or -1 after reaping.
       std::string m_name;  ///< KWin/Sunshine capture output name.
     };
 
     /**
-     * @brief Locate `krfb-virtualmonitor` for compositor virtual outputs.
+     * @brief Search PATH for an executable name.
      */
-    [[nodiscard]] std::string krfb_virtualmonitor_path() {
-      if (const char *env = std::getenv("KRFB_VIRTUALMONITOR")) {
-        if (env[0] && access(env, X_OK) == 0) {
-          return env;
-        }
-      }
-
+    [[nodiscard]] std::string find_on_path(const std::string &exe) {
       const char *path = std::getenv("PATH");
       if (!path) {
         return {};
@@ -1476,12 +1470,47 @@ namespace dual_display {
         if (dir.empty()) {
           continue;
         }
-        auto candidate = dir + "/krfb-virtualmonitor";
+        auto candidate = dir + "/" + exe;
         if (access(candidate.c_str(), X_OK) == 0) {
           return candidate;
         }
       }
       return {};
+    }
+
+    /**
+     * @brief Locate the KWin virtual-output helper (or krfb as a fallback).
+     */
+    [[nodiscard]] std::string virtual_output_helper_path() {
+      if (const char *env = std::getenv("SUNSHINE_DS_VIRTUAL_HELPER")) {
+        if (env[0] && access(env, X_OK) == 0) {
+          return env;
+        }
+      }
+
+      char self[4096];
+      const auto n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+      if (n > 0) {
+        self[n] = '\0';
+        std::string dir {self};
+        const auto slash = dir.rfind('/');
+        if (slash != std::string::npos) {
+          auto candidate = dir.substr(0, slash) + "/sunshine-ds-virtual-output";
+          if (access(candidate.c_str(), X_OK) == 0) {
+            return candidate;
+          }
+        }
+      }
+
+      if (auto found = find_on_path("sunshine-ds-virtual-output"); !found.empty()) {
+        return found;
+      }
+      if (const char *env = std::getenv("KRFB_VIRTUALMONITOR")) {
+        if (env[0] && access(env, X_OK) == 0) {
+          return env;
+        }
+      }
+      return find_on_path("krfb-virtualmonitor");
     }
 
     /**
@@ -1515,34 +1544,35 @@ namespace dual_display {
       if (!std::getenv("WAYLAND_DISPLAY")) {
         return false;
       }
-      return !krfb_virtualmonitor_path().empty();
+      return !virtual_output_helper_path().empty();
+    }
+
+    [[nodiscard]] bool helper_is_krfb(const std::string &binary) {
+      return binary.find("krfb-virtualmonitor") != std::string::npos;
     }
 
     [[nodiscard]] std::unique_ptr<lease_t> acquire_virtual_display(const request_t &request) {
-      auto binary = krfb_virtualmonitor_path();
+      auto binary = virtual_output_helper_path();
       if (binary.empty()) {
-        BOOST_LOG(warning) << "Virtual second display requested, but krfb-virtualmonitor is not installed"sv;
+        BOOST_LOG(warning) << "Virtual second display requested, but sunshine-ds-virtual-output is not installed"sv;
         return nullptr;
       }
 
       const auto name = std::string {"sunshine-ds"};
       const auto capture_name = "Virtual-" + name;
-      const auto resolution = std::to_string(request.width) + "x" + std::to_string(request.height);
+      const auto width = std::to_string(request.width);
+      const auto height = std::to_string(request.height);
+      const auto resolution = width + "x" + height;
       const auto port = std::getenv("KRFB_VIRTUALMONITOR_PORT") ? std::getenv("KRFB_VIRTUALMONITOR_PORT") : "5910";
+      const bool krfb = helper_is_krfb(binary);
 
-      std::vector<std::string> args {
-        binary,
-        "--resolution",
-        resolution,
-        "--name",
-        name,
-        "--password",
-        "sunshine-ds",
-        "--scale",
-        "1",
-        "--port",
-        port,
-      };
+      std::vector<std::string> args {binary};
+      if (krfb) {
+        args.insert(args.end(), {"--resolution", resolution, "--name", name, "--password", "sunshine-ds", "--scale", "1", "--port", port});
+      } else {
+        args.insert(args.end(), {"--name", name, "--width", width, "--height", height, "--scale", "1"});
+      }
+
       std::vector<char *> argv;
       argv.reserve(args.size() + 1);
       for (auto &arg : args) {
@@ -1552,20 +1582,20 @@ namespace dual_display {
 
       posix_spawn_file_actions_t actions;
       posix_spawn_file_actions_init(&actions);
-      int devnull = open("/dev/null", O_WRONLY);
-      if (devnull >= 0) {
-        posix_spawn_file_actions_adddup2(&actions, devnull, STDOUT_FILENO);
-        posix_spawn_file_actions_adddup2(&actions, devnull, STDERR_FILENO);
+      int logfd = open("/tmp/sunshine-ds-virtual-output.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (logfd >= 0) {
+        posix_spawn_file_actions_adddup2(&actions, logfd, STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, logfd, STDERR_FILENO);
       }
 
       pid_t pid = -1;
       const int spawned = posix_spawn(&pid, binary.c_str(), &actions, nullptr, argv.data(), environ);
       posix_spawn_file_actions_destroy(&actions);
-      if (devnull >= 0) {
-        close(devnull);
+      if (logfd >= 0) {
+        close(logfd);
       }
       if (spawned != 0) {
-        BOOST_LOG(warning) << "Failed to spawn krfb-virtualmonitor: "sv << strerror(spawned);
+        BOOST_LOG(warning) << "Failed to spawn virtual-output helper: "sv << strerror(spawned);
         return nullptr;
       }
 
@@ -1575,7 +1605,7 @@ namespace dual_display {
         int status = 0;
         const auto waited = waitpid(pid, &status, WNOHANG);
         if (waited == pid) {
-          BOOST_LOG(warning) << "krfb-virtualmonitor exited before the virtual output appeared"sv;
+          BOOST_LOG(warning) << "Virtual-output helper exited before the output appeared"sv;
           return nullptr;
         }
         if (output_is_attached(capture_name) || output_is_attached(name)) {
@@ -1589,7 +1619,7 @@ namespace dual_display {
         retry_delay = std::min(retry_delay * 2, 400ms);
       }
 
-      BOOST_LOG(warning) << "krfb-virtualmonitor started, but KWin never advertised "sv << capture_name;
+      BOOST_LOG(warning) << "Virtual-output helper started, but KWin never advertised "sv << capture_name;
       kill(pid, SIGTERM);
       waitpid(pid, nullptr, 0);
       return nullptr;
