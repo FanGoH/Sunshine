@@ -94,6 +94,16 @@ Set `dual_display_source` to the output name or stable display identifier of an
 attached monitor. Nothing is created or removed. Capture uses that display and
 the encoder produces the dimensions requested by the client.
 
+### Linux / KWin virtual output
+
+On Linux, `dual_display_source = virtual` creates a compositor virtual monitor
+with `krfb-virtualmonitor` and captures it with `capture = kwin`. The helper is
+stopped when the second stream ends. Physical outputs are not disabled.
+
+KMS cannot see a KWin-only virtual monitor. Named existing outputs
+(`dual_display_source = Virtual-sunshine-ds`, or a second HDMI) work without
+creating anything, still with `capture = kwin`.
+
 ## Behavior without a supported source
 
 When the feature is disabled or no configured source is available,
