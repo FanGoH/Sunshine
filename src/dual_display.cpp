@@ -40,6 +40,16 @@
   // platform includes
   #include <windows.h>
   #include <setupapi.h>
+#elif defined(__linux__)
+  #include <cerrno>
+  #include <csignal>
+  #include <cstdlib>
+  #include <fcntl.h>
+  #include <spawn.h>
+  #include <sys/wait.h>
+  #include <unistd.h>
+
+extern char **environ;
 #endif
 
 using namespace std::literals;
@@ -1390,21 +1400,215 @@ namespace dual_display {
       BOOST_LOG(warning) << "Virtual second display requested, but neither SudoVDA nor a recognized virtual output is available"sv;
       return nullptr;
     }
+#elif defined(__linux__)
+    /**
+     * @brief A compositor virtual output owned by `krfb-virtualmonitor`.
+     *
+     * KWin virtual monitors exist only in the compositor, so KMS cannot see
+     * them. Capture must use `capture = kwin`. Destroying the lease sends
+     * SIGTERM to the helper; the physical TV is never disabled.
+     */
+    class kwin_virtual_lease_t: public lease_t {
+    public:
+      kwin_virtual_lease_t(pid_t pid, std::string name):
+          m_pid {pid},
+          m_name {std::move(name)} {
+      }
+
+      kwin_virtual_lease_t(const kwin_virtual_lease_t &) = delete;
+      kwin_virtual_lease_t &operator=(const kwin_virtual_lease_t &) = delete;
+
+      ~kwin_virtual_lease_t() override {
+        if (m_pid <= 0) {
+          return;
+        }
+
+        BOOST_LOG(info) << "Second display: removing KWin virtual output "sv << m_name;
+        if (kill(m_pid, SIGTERM) != 0 && errno != ESRCH) {
+          BOOST_LOG(warning) << "Failed to stop krfb-virtualmonitor: "sv << strerror(errno);
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        int status = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+          const auto waited = waitpid(m_pid, &status, WNOHANG);
+          if (waited == m_pid || (waited < 0 && errno == ECHILD)) {
+            m_pid = -1;
+            return;
+          }
+          std::this_thread::sleep_for(50ms);
+        }
+
+        kill(m_pid, SIGKILL);
+        waitpid(m_pid, &status, 0);
+        m_pid = -1;
+      }
+
+      [[nodiscard]] std::string output_name() const override {
+        return m_name;
+      }
+
+    private:
+      pid_t m_pid;  ///< krfb-virtualmonitor child, or -1 after reaping.
+      std::string m_name;  ///< KWin/Sunshine capture output name.
+    };
+
+    /**
+     * @brief Locate `krfb-virtualmonitor` for compositor virtual outputs.
+     */
+    [[nodiscard]] std::string krfb_virtualmonitor_path() {
+      if (const char *env = std::getenv("KRFB_VIRTUALMONITOR")) {
+        if (env[0] && access(env, X_OK) == 0) {
+          return env;
+        }
+      }
+
+      const char *path = std::getenv("PATH");
+      if (!path) {
+        return {};
+      }
+
+      std::string remaining {path};
+      while (!remaining.empty()) {
+        auto sep = remaining.find(':');
+        auto dir = remaining.substr(0, sep);
+        remaining = sep == std::string::npos ? std::string {} : remaining.substr(sep + 1);
+        if (dir.empty()) {
+          continue;
+        }
+        auto candidate = dir + "/krfb-virtualmonitor";
+        if (access(candidate.c_str(), X_OK) == 0) {
+          return candidate;
+        }
+      }
+      return {};
+    }
+
+    /**
+     * @brief True when `needle` is an attached capture or KScreen output.
+     */
+    [[nodiscard]] bool output_is_attached(const std::string &needle) {
+      if (needle.empty()) {
+        return false;
+      }
+
+      const auto outputs = platf::display_names(platf::mem_type_e::system);
+      if (std::find(std::begin(outputs), std::end(outputs), needle) != std::end(outputs)) {
+        return true;
+      }
+
+      auto *pipe = popen("kscreen-doctor -o 2>/dev/null", "r");
+      if (!pipe) {
+        return false;
+      }
+
+      std::string text;
+      std::array<char, 512> buf {};
+      while (fgets(buf.data(), static_cast<int>(buf.size()), pipe)) {
+        text.append(buf.data());
+      }
+      pclose(pipe);
+      return text.find(needle) != std::string::npos;
+    }
+
+    [[nodiscard]] bool virtual_display_available() {
+      if (!std::getenv("WAYLAND_DISPLAY")) {
+        return false;
+      }
+      return !krfb_virtualmonitor_path().empty();
+    }
+
+    [[nodiscard]] std::unique_ptr<lease_t> acquire_virtual_display(const request_t &request) {
+      auto binary = krfb_virtualmonitor_path();
+      if (binary.empty()) {
+        BOOST_LOG(warning) << "Virtual second display requested, but krfb-virtualmonitor is not installed"sv;
+        return nullptr;
+      }
+
+      const auto name = std::string {"sunshine-ds"};
+      const auto capture_name = "Virtual-" + name;
+      const auto resolution = std::to_string(request.width) + "x" + std::to_string(request.height);
+      const auto port = std::getenv("KRFB_VIRTUALMONITOR_PORT") ? std::getenv("KRFB_VIRTUALMONITOR_PORT") : "5910";
+
+      std::vector<std::string> args {
+        binary,
+        "--resolution",
+        resolution,
+        "--name",
+        name,
+        "--password",
+        "sunshine-ds",
+        "--scale",
+        "1",
+        "--port",
+        port,
+      };
+      std::vector<char *> argv;
+      argv.reserve(args.size() + 1);
+      for (auto &arg : args) {
+        argv.push_back(arg.data());
+      }
+      argv.push_back(nullptr);
+
+      posix_spawn_file_actions_t actions;
+      posix_spawn_file_actions_init(&actions);
+      int devnull = open("/dev/null", O_WRONLY);
+      if (devnull >= 0) {
+        posix_spawn_file_actions_adddup2(&actions, devnull, STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, devnull, STDERR_FILENO);
+      }
+
+      pid_t pid = -1;
+      const int spawned = posix_spawn(&pid, binary.c_str(), &actions, nullptr, argv.data(), environ);
+      posix_spawn_file_actions_destroy(&actions);
+      if (devnull >= 0) {
+        close(devnull);
+      }
+      if (spawned != 0) {
+        BOOST_LOG(warning) << "Failed to spawn krfb-virtualmonitor: "sv << strerror(spawned);
+        return nullptr;
+      }
+
+      auto retry_delay = 50ms;
+      const auto deadline = std::chrono::steady_clock::now() + 8s;
+      while (std::chrono::steady_clock::now() < deadline) {
+        int status = 0;
+        const auto waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+          BOOST_LOG(warning) << "krfb-virtualmonitor exited before the virtual output appeared"sv;
+          return nullptr;
+        }
+        if (output_is_attached(capture_name) || output_is_attached(name)) {
+          const auto resolved = output_is_attached(capture_name) ? capture_name : name;
+          BOOST_LOG(info) << "Second display: created KWin virtual output "sv << resolved << " at "sv
+                          << resolution << '@' << request.framerate
+                          << "; it will be removed when the second stream ends"sv;
+          return std::make_unique<kwin_virtual_lease_t>(pid, resolved);
+        }
+        std::this_thread::sleep_for(retry_delay);
+        retry_delay = std::min(retry_delay * 2, 400ms);
+      }
+
+      BOOST_LOG(warning) << "krfb-virtualmonitor started, but KWin never advertised "sv << capture_name;
+      kill(pid, SIGTERM);
+      waitpid(pid, nullptr, 0);
+      return nullptr;
+    }
 #else
     /**
      * @brief Report virtual-display availability on unsupported platforms.
      *
-     * @return Always false outside Windows.
+     * @return Always false outside Windows and Linux.
      */
     [[nodiscard]] bool virtual_display_available() {
       return false;
     }
 
     /**
-     * @brief Refuse virtual-display acquisition outside Windows.
+     * @brief Refuse virtual-display acquisition on unsupported platforms.
      *
      * @param request Requested client-panel mode.
-     * @return Always null outside Windows.
+     * @return Always null outside Windows and Linux.
      */
     [[nodiscard]] std::unique_ptr<lease_t> acquire_virtual_display([[maybe_unused]] const request_t &request) {
       return nullptr;
