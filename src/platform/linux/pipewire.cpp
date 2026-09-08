@@ -1130,13 +1130,28 @@ namespace pipewire {
       if (mem_type == platf::mem_type_e::system && capture_egl_ready) {
         static std::atomic<bool> software_dmabuf_probed {false};
         if (!software_dmabuf_probed.exchange(true)) {
-          std::shared_ptr<platf::img_t> probe_img;
-          const pull_free_image_cb_t pull = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
-            img_out = alloc_img();
-            return static_cast<bool>(img_out);
-          };
-          const auto st = snapshot(pull, probe_img, 500ms, true);
-          BOOST_LOG(info) << "[pipewire] software DMA-BUF probe snapshot status="sv << std::to_underlying(st);
+          int best_nonzero = -1;
+          for (int attempt = 0; attempt < 4; ++attempt) {
+            std::shared_ptr<platf::img_t> probe_img;
+            const pull_free_image_cb_t pull = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
+              img_out = alloc_img();
+              return static_cast<bool>(img_out);
+            };
+            const auto st = snapshot(pull, probe_img, 400ms, true);
+            int nonzero = 0;
+            if (probe_img && probe_img->data) {
+              const auto nbytes = static_cast<size_t>(std::max(probe_img->height, 0)) * static_cast<size_t>(std::max(probe_img->row_pitch, 0));
+              for (size_t i = 0; i < nbytes; ++i) {
+                nonzero += probe_img->data[i] != 0;
+              }
+            }
+            BOOST_LOG(info) << "[pipewire] software DMA-BUF probe snapshot status="sv << std::to_underlying(st)
+                            << " nonzero="sv << nonzero << " attempt="sv << attempt;
+            best_nonzero = std::max(best_nonzero, nonzero);
+            if (nonzero > 0) {
+              break;
+            }
+          }
         }
       }
 
@@ -1176,6 +1191,7 @@ namespace pipewire {
       int tex_h = 0;
       gl::ctx.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tex_w);
       gl::ctx.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &tex_h);
+      gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
       const auto copy_w = std::min(img->width, std::max(tex_w, 0));
       const auto copy_h = std::min(img->height, std::max(tex_h, 0));
       if (copy_w <= 0 || copy_h <= 0) {
@@ -1183,21 +1199,46 @@ namespace pipewire {
         return -1;
       }
 
-      const auto buf_bytes = static_cast<GLsizei>(img->height) * img->row_pitch;
-      if (gl::ctx.GetTextureSubImage) {
-        gl::ctx.GetTextureSubImage(rgb->tex[0], 0, 0, 0, 0, copy_w, copy_h, 1, GL_BGRA, GL_UNSIGNED_BYTE, buf_bytes, img->data);
-      } else {
-        GLuint fbo = 0;
-        gl::ctx.GenFramebuffers(1, &fbo);
-        gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, fbo);
-        gl::ctx.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rgb->tex[0], 0);
-        gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, img->row_pitch / std::max(img->pixel_pitch, 1));
-        gl::ctx.ReadPixels(0, 0, copy_w, copy_h, GL_BGRA, GL_UNSIGNED_BYTE, img->data);
-        gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, 0);
-        gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, 0);
-        gl::ctx.DeleteFramebuffers(1, &fbo);
-      }
+      // GetTextureSubImage on an imported DMA-BUF texture returns zeros on
+      // this AMD/Mesa + Distrobox path. Blit into a regular FBO first, which
+      // also waits on the implicit write fence.
+      GLuint src_fbo = 0;
+      GLuint dst_fbo = 0;
+      GLuint dst_tex = 0;
+      gl::ctx.GenFramebuffers(1, &src_fbo);
+      gl::ctx.GenFramebuffers(1, &dst_fbo);
+      gl::ctx.GenTextures(1, &dst_tex);
+      gl::ctx.BindTexture(GL_TEXTURE_2D, dst_tex);
+      gl::ctx.TexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, copy_w, copy_h);
       gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
+
+      gl::ctx.BindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
+      gl::ctx.FramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rgb->tex[0], 0);
+      const auto src_status = gl::ctx.CheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+      gl::ctx.BindFramebuffer(GL_DRAW_FRAMEBUFFER, dst_fbo);
+      gl::ctx.FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
+      const auto dst_status = gl::ctx.CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+      if (src_status != GL_FRAMEBUFFER_COMPLETE || dst_status != GL_FRAMEBUFFER_COMPLETE) {
+        BOOST_LOG(error) << "[pipewire] DMA-BUF blit FBO incomplete src="sv << src_status << " dst="sv << dst_status
+                         << " fourcc="sv << img->sd.fourcc << " modifier="sv << img->sd.modifier;
+        gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl::ctx.DeleteFramebuffers(1, &src_fbo);
+        gl::ctx.DeleteFramebuffers(1, &dst_fbo);
+        gl::ctx.DeleteTextures(1, &dst_tex);
+        return -1;
+      }
+
+      gl::ctx.BlitFramebuffer(0, 0, copy_w, copy_h, 0, 0, copy_w, copy_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+      gl::ctx.Finish();
+      gl::ctx.BindFramebuffer(GL_READ_FRAMEBUFFER, dst_fbo);
+      gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, img->row_pitch / std::max(img->pixel_pitch, 1));
+      gl::ctx.ReadPixels(0, 0, copy_w, copy_h, GL_BGRA, GL_UNSIGNED_BYTE, img->data);
+      gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, 0);
+      const auto gl_err = gl::ctx.GetError();
+      gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, 0);
+      gl::ctx.DeleteFramebuffers(1, &src_fbo);
+      gl::ctx.DeleteFramebuffers(1, &dst_fbo);
+      gl::ctx.DeleteTextures(1, &dst_tex);
 
       static std::atomic<int> copies {0};
       const int n = copies.fetch_add(1);
@@ -1208,7 +1249,9 @@ namespace pipewire {
           nonzero += img->data[i] != 0;
         }
         BOOST_LOG(info) << "[pipewire] DMA-BUF copied "sv << copy_w << "x"sv << copy_h
-                        << " nonzero="sv << nonzero << "/"sv << nbytes << " n="sv << n;
+                        << " nonzero="sv << nonzero << "/"sv << nbytes
+                        << " fourcc="sv << img->sd.fourcc << " modifier="sv << img->sd.modifier
+                        << " gl_err="sv << gl_err << " n="sv << n;
       }
 
       img->reset();
