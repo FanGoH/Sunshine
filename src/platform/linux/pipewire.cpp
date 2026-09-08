@@ -490,18 +490,8 @@ namespace pipewire {
 
       auto *img_descriptor = static_cast<img_descriptor_t *>(img);
 
-      if (stream_data.current_buffer && stream_data.current_buffer->buffer->datas[0].type == SPA_DATA_DmaBuf) {
-        struct spa_buffer *buf = stream_data.current_buffer->buffer;
-        if (buf->datas[0].chunk && buf->datas[0].chunk->size != 0) {
-          fill_img_metadata(img_descriptor, buf);
-          fill_img_dmabuf(img_descriptor, buf, stream_data);
-        }
-        pw_thread_loop_unlock(loop);
-        return;
-      }
-
-      // CPU path: copy from the staging vector. Do not inspect current_buffer —
-      // on_process already returned that pw_buffer to PipeWire.
+      // CPU staging first so software encode has pixels even when we also
+      // attach DMA-BUF fds for hardware encode.
       if (stream_data.cpu_frame_valid && stream_data.front_buffer && !stream_data.front_buffer->empty() && img->data) {
         const auto src_stride = stream_data.local_stride > 0 ? stream_data.local_stride : static_cast<size_t>(img->row_pitch);
         const auto dst_stride = static_cast<size_t>(img->row_pitch);
@@ -517,6 +507,14 @@ namespace pipewire {
           std::memcpy(img->data + static_cast<size_t>(y) * dst_stride, src + src_off, copy_w);
         }
         img_descriptor->pixel_pitch = (stream_data.format.info.raw.format == SPA_VIDEO_FORMAT_NV12) ? 1 : 4;
+      }
+
+      if (stream_data.current_buffer && stream_data.current_buffer->buffer->datas[0].type == SPA_DATA_DmaBuf) {
+        struct spa_buffer *buf = stream_data.current_buffer->buffer;
+        if (buf->datas[0].chunk && buf->datas[0].chunk->size != 0) {
+          fill_img_metadata(img_descriptor, buf);
+          fill_img_dmabuf(img_descriptor, buf, stream_data);
+        }
       }
 
       pw_thread_loop_unlock(loop);
@@ -729,21 +727,62 @@ namespace pipewire {
       struct spa_data *d0 = &b->buffer->datas[0];
 
       // 2. Fast Path: DMA-BUF
+      // 2. Fast Path: DMA-BUF. Keep the pw_buffer for hardware encode, and
+      // also stage a CPU copy when the fd is mmap-able (linear 1920x1080 BGRA
+      // is 8294400 bytes / stride 7680). Distrobox EGL import of host KWin
+      // buffers is unreliable; mmap still works for LINEAR.
       if (d0->type == SPA_DATA_DmaBuf) {
-        std::scoped_lock lock(d->frame_mutex);
-        if (d->current_buffer) {
-          pw_stream_queue_buffer(d->stream, d->current_buffer);
+        size_t size = d0->chunk ? d0->chunk->size : 0;
+        size_t offset = d0->chunk ? d0->chunk->offset : 0;
+        uint8_t *src = static_cast<uint8_t *>(d0->data);
+        void *mapped = nullptr;
+        size_t map_size = 0;
+        if (src == nullptr && d0->fd >= 0 && size > 0) {
+          map_size = d0->maxsize > 0 ? d0->maxsize : (offset + size);
+          mapped = mmap(nullptr, map_size, PROT_READ, MAP_SHARED, d0->fd, static_cast<off_t>(d0->mapoffset));
+          if (mapped == MAP_FAILED) {
+            mapped = mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, d0->fd, static_cast<off_t>(d0->mapoffset));
+          }
+          if (mapped == MAP_FAILED) {
+            mapped = nullptr;
+          } else {
+            src = static_cast<uint8_t *>(mapped) + offset;
+          }
         }
-        d->current_buffer = b;
-        d->cpu_frame_valid = false;
-        d->frame_ready = true;
+        {
+          std::scoped_lock lock(d->frame_mutex);
+          if (d->current_buffer) {
+            pw_stream_queue_buffer(d->stream, d->current_buffer);
+          }
+          d->current_buffer = b;
+          if (src != nullptr && size > 0) {
+            if (d->back_buffer->size() < size) {
+              d->back_buffer->resize(size);
+            }
+            std::memcpy(d->back_buffer->data(), src, size);
+            std::swap(d->front_buffer, d->back_buffer);
+            d->local_stride = d0->chunk ? d0->chunk->stride : 0;
+            d->cpu_frame_valid = true;
+          }
+          d->frame_ready = true;
+        }
         static std::atomic<int> dma {0};
         const int n = dma.fetch_add(1);
         if (n < 8) {
+          size_t nonzero = 0;
+          if (src != nullptr && size > 0) {
+            const auto ncheck = std::min(size, static_cast<size_t>(4096));
+            for (size_t i = 0; i < ncheck; ++i) {
+              nonzero += src[i] != 0;
+            }
+          }
           BOOST_LOG(info) << "[pipewire] dma-buf fd="sv << d0->fd
-                          << " size="sv << (d0->chunk ? d0->chunk->size : 0)
-                          << " stride="sv << (d0->chunk ? d0->chunk->stride : 0)
-                          << " n="sv << n;
+                          << " size="sv << size << " stride="sv << (d0->chunk ? d0->chunk->stride : 0)
+                          << " mmap="sv << (mapped ? "yes"sv : "no"sv)
+                          << " nonzero_head="sv << nonzero << " n="sv << n;
+        }
+        if (mapped != nullptr) {
+          munmap(mapped, map_size);
         }
       }
       // 3. CPU path: MemPtr, or MemFd that MAP_BUFFERS did not map (common in Distrobox).
@@ -1186,8 +1225,8 @@ namespace pipewire {
 
         if (mem_type == platf::mem_type_e::system && img_egl->sd.fds[0] >= 0) {
           if (copy_dmabuf_to_cpu(img_egl) != 0) {
-            retries++;
-            continue;
+            // Keep the mmap CPU staging copy from fill_img; just drop the fds.
+            img_egl->reset();
           }
         }
 
