@@ -342,8 +342,8 @@ namespace pipewire {
      *
      * Must be called without holding the thread-loop lock. Destroying the
      * stream while the loop is still running (and locked) deadlocks
-     * `pw_loop_invoke`, and closing KWin first leaves the node until a
-     * ~75s compositor timeout — encoder probe then blocks HTTP :48100.
+     * `pw_loop_invoke`. KWin Close must already have been flushed, or the
+     * loop thread blocks in the daemon until a ~75s node timeout.
      */
     void shutdown() {
       if (!loop || stopped) {

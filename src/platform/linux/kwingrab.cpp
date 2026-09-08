@@ -286,20 +286,9 @@ namespace kwin {
       BOOST_LOG(info) << "[kwingrab] closing screencast stream"sv;
       zkde_screencast_stream_unstable_v1_close(kde_screencast_stream_v1_);
       kde_screencast_stream_v1_ = nullptr;
-      wl_display_flush(wl_display);
-
-      auto deadline = std::chrono::steady_clock::now() + 250ms;
-      while (std::chrono::steady_clock::now() < deadline) {
-        struct pollfd pfd {};
-        pfd.fd = wl_display_get_fd(wl_display);
-        pfd.events = POLLIN;
-        const int rc = poll(&pfd, 1, 50);
-        if (rc <= 0) {
-          break;
-        }
-        if ((pfd.revents & POLLIN) && wl_display_dispatch(wl_display) < 0) {
-          break;
-        }
+      // roundtrip so KWin processes Close before PipeWire teardown
+      if (wl_display_roundtrip(wl_display) < 0) {
+        BOOST_LOG(warning) << "[kwingrab] roundtrip after Close failed"sv;
       }
     }
 
@@ -703,13 +692,12 @@ namespace kwin {
   class kwin_t: public pipewire::pipewire_display_t {
   public:
     ~kwin_t() {
-      // C++ would destroy `screencast` (KWin producer) before the base
-      // `pipewire` consumer. Close the consumer first, then flush Close
-      // so KWin drops the node immediately.
-      pipewire.shutdown();
+      // Flush Close while the Wayland connection is still up. If PipeWire
+      // stops first, KWin never sees Close and holds the node for ~75s.
       if (screencast) {
         screencast->close_stream();
       }
+      pipewire.shutdown();
     }
 
     int configure_stream(const std::string &display_name, int &out_pipewire_fd, uint32_t &out_pipewire_node, uint64_t &out_pipewire_objectserial) override {
