@@ -322,6 +322,15 @@ namespace nvhttp {
    * @return true if the client was found and updated.
    */
   bool set_client_enabled(std::string_view uuid, bool enabled);
+
+  /**
+   * @brief Update the stored friendly name for a paired client certificate.
+   *
+   * @param cert_pem PEM for the paired client.
+   * @param name Human-readable name from Moonlight (`devicename`).
+   * @return true when the client was found and the name changed or already matched.
+   */
+  bool set_client_name_by_cert(std::string_view cert_pem, std::string_view name);
   /**
    * @brief Get cert by UUID.
    *

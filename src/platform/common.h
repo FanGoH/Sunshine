@@ -432,6 +432,11 @@ namespace platf {
     // client. It must be used when communicating back to the client via
     // the input feedback queue.
     std::uint8_t clientRelativeIndex;  ///< Client relative index.
+
+    // Friendly Moonlight client name (Build.MODEL) and uniqueid, used so each
+    // client's uinput node is bindable. Empty keeps the generic profile name.
+    std::string clientName;  ///< Paired client display name (Thor, Odin2_Portal, …).
+    std::string clientUniqueId;  ///< Moonlight uniqueid when the display name is missing.
   };
 
   /**

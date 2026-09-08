@@ -638,6 +638,7 @@ namespace stream {
 
     std::uint32_t launch_session_id;  ///< RTSP launch-session ID associated with this stream.
     std::string client_cert;  ///< PEM certificate for the paired client owning the stream.
+    std::string client_name;  ///< Friendly Moonlight client name used to label the virtual gamepad.
     std::string input_session_id;  ///< Stable client identity used to retain input devices across resume.
     std::string client_unique_id;  ///< Stable paired-client identity used for virtual-monitor persistence.
 
@@ -2816,7 +2817,7 @@ namespace stream {
      * @brief Start the audio, video, and control workers for a streaming session.
      */
     int start(session_t &session, const std::string &addr_string) {
-      session.input = input::alloc(session.mail, session.input_session_id);
+      session.input = input::alloc(session.mail, session.input_session_id, session.client_name, session.client_unique_id);
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {
@@ -2884,6 +2885,7 @@ namespace stream {
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
       session->client_cert = launch_session.client_cert;
+      session->client_name = launch_session.client_name;
       session->input_session_id = launch_session.client_cert.empty() ? launch_session.unique_id : launch_session.client_cert;
       session->client_unique_id = launch_session.unique_id.empty() ? launch_session.client_cert : launch_session.unique_id;
 

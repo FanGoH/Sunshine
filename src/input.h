@@ -101,9 +101,11 @@ namespace input {
    *
    * @param mail Mailbox used to exchange messages with worker threads.
    * @param session_id Stable paired-client identity shared by launch and resume connections.
+   * @param client_name Friendly Moonlight client name used to label the virtual pad.
+   * @param unique_id Moonlight uniqueid used when client_name is empty or "roth".
    * @return Shared input state bound to the stream mailbox.
    */
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id);
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id, std::string client_name = {}, std::string unique_id = {});
 
 #ifdef SUNSHINE_TESTS
   namespace testing {

@@ -531,6 +531,13 @@ namespace nvhttp {
     launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
     launch_session->client_cert = last_verified_client_cert;
     launch_session->client_name = last_verified_client_name;
+    auto reported_name = get_arg(args, "devicename", "");
+    if (!reported_name.empty() && reported_name != "roth") {
+      launch_session->client_name = reported_name;
+      if (!launch_session->client_cert.empty()) {
+        set_client_name_by_cert(launch_session->client_cert, reported_name);
+      }
+    }
 
     // Generate the unique identifiers for this connection that we will send later during RTSP handshake
     unsigned char raw_payload[8];
@@ -1764,6 +1771,27 @@ namespace nvhttp {
         named_cert.enabled = enabled;
         rebuild_client_cert_chain();
         save_state();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool set_client_name_by_cert(const std::string_view cert_pem, const std::string_view name) {
+    if (name.empty() || name == "roth") {
+      return false;
+    }
+    const auto canonical = canonical_certificate_pem(std::string {cert_pem});
+    if (canonical.empty()) {
+      return false;
+    }
+    std::lock_guard lock {client_auth_mutex()};
+    for (auto &named_cert : client_root.named_devices) {
+      if (named_cert.cert == canonical || named_cert.cert == cert_pem) {
+        if (named_cert.name != name) {
+          named_cert.name = std::string {name};
+          save_state();
+        }
         return true;
       }
     }

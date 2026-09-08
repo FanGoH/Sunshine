@@ -6,6 +6,7 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +16,7 @@
 #include <numbers>
 #include <optional>
 #include <random>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -26,6 +28,49 @@
 using namespace std::literals;
 
 namespace platf::virtualhid {
+  namespace {
+    /**
+     * @brief Keep uinput names udev-safe and short (`Sunshine (libvirtualhid)*`).
+     */
+    std::string sanitize_client_label(std::string_view raw) {
+      std::string out;
+      out.reserve(raw.size());
+      bool pending_space = false;
+      for (unsigned char ch : raw) {
+        if (std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.') {
+          if (pending_space && !out.empty()) {
+            out.push_back('_');
+          }
+          pending_space = false;
+          out.push_back(static_cast<char>(ch));
+        } else if (std::isspace(ch) && !out.empty()) {
+          pending_space = true;
+        }
+      }
+      if (out.size() > 48) {
+        out.resize(48);
+      }
+      if (out.empty() || out == "roth" || out == "Roth") {
+        return {};
+      }
+      return out;
+    }
+
+    std::string named_gamepad_profile_name(const gamepad_id_t &id, std::string_view fallback_profile_name) {
+      auto label = sanitize_client_label(id.clientName);
+      if (label.empty()) {
+        auto uniq = sanitize_client_label(id.clientUniqueId);
+        if (uniq.size() > 8) {
+          uniq.resize(8);
+        }
+        label = std::move(uniq);
+      }
+      if (label.empty()) {
+        return std::format("Sunshine {}", fallback_profile_name);
+      }
+      return std::format("Sunshine (libvirtualhid) {}", label);
+    }
+  }  // namespace
   /**
    * @brief Runtime state for one virtual gamepad.
    */
@@ -577,7 +622,7 @@ namespace platf::virtualhid {
 
     const auto &selection = profile_for_metadata(metadata);
     auto profile = selection.profile();
-    profile.name = std::format("Sunshine {}", profile.name);
+    profile.name = named_gamepad_profile_name(id, profile.name);
     if (config::input.gamepad != "auto"sv) {
       BOOST_LOG(info) << "Gamepad "sv << id.globalIndex << " will be "sv << profile.name << " (manual selection)"sv;
     } else {

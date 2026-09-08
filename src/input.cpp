@@ -328,6 +328,8 @@ namespace input {
 
     int32_t accumulated_vscroll_delta;  ///< Accumulated vscroll delta.
     int32_t accumulated_hscroll_delta;  ///< Accumulated hscroll delta.
+    std::string client_name;  ///< Friendly Moonlight client name for the virtual pad label.
+    std::string unique_id;  ///< Moonlight uniqueid used when client_name is empty or "roth".
   };
 
   /**
@@ -1344,7 +1346,13 @@ namespace input {
       return -1;
     }
 
-    if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(client_index)}, arrival, input->feedback_queue)) {
+    platf::gamepad_id_t gid {
+      id,
+      static_cast<std::uint8_t>(client_index),
+      input->client_name,
+      input->unique_id
+    };
+    if (platf::alloc_gamepad(platf_input, gid, arrival, input->feedback_queue)) {
       free_id(gamepadMask, id);
       return -1;
     }
@@ -2444,7 +2452,7 @@ namespace input {
   /**
    * @brief Allocate and initialize platform input state for a stream.
    */
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id, std::string client_name, std::string unique_id) {
     std::shared_ptr<input_t> input;
     bool resumed = false;
     {
@@ -2453,6 +2461,8 @@ namespace input {
       const auto iter = state.inputs.find(session_id);
       if (iter != state.inputs.end()) {
         input = iter->second;
+        input->client_name = std::move(client_name);
+        input->unique_id = std::move(unique_id);
         resumed = true;
       } else {
         input = std::make_shared<input_t>(
@@ -2460,6 +2470,8 @@ namespace input {
           mail->event<input::touch_port_t>(mail::touch_port2),
           mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
         );
+        input->client_name = std::move(client_name);
+        input->unique_id = std::move(unique_id);
         state.inputs.try_emplace(std::move(session_id), input);
       }
     }
