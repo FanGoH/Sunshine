@@ -1598,8 +1598,18 @@ namespace dual_display {
         posix_spawn_file_actions_adddup2(&actions, logfd, STDERR_FILENO);
       }
 
+      posix_spawnattr_t spawn_attr;
+      posix_spawnattr_init(&spawn_attr);
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+      // Resizing detaches this helper from the session. If it inherits
+      // GameStream listen sockets and sunshine-ds later dies, :48100/:48121
+      // stay held and the next DS cannot bind.
+      posix_spawnattr_setflags(&spawn_attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
+
       pid_t pid = -1;
-      const int spawned = posix_spawn(&pid, binary.c_str(), &actions, nullptr, argv.data(), environ);
+      const int spawned = posix_spawn(&pid, binary.c_str(), &actions, &spawn_attr, argv.data(), environ);
+      posix_spawnattr_destroy(&spawn_attr);
       posix_spawn_file_actions_destroy(&actions);
       if (logfd >= 0) {
         close(logfd);
