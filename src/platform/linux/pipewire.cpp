@@ -314,6 +314,18 @@ namespace pipewire {
       return stream_data.cpu_frame_valid;
     }
 
+    void release_current_buffer() {
+      pw_thread_loop_lock(loop);
+      {
+        std::scoped_lock lock(stream_data.frame_mutex);
+        if (stream_data.current_buffer && stream_data.stream) {
+          pw_stream_queue_buffer(stream_data.stream, stream_data.current_buffer);
+          stream_data.current_buffer = nullptr;
+        }
+      }
+      pw_thread_loop_unlock(loop);
+    }
+
     /**
      * @brief Check and log whether the active session will require Sunshine to perform pacing.
      *
@@ -457,16 +469,6 @@ namespace pipewire {
         BOOST_LOG(info) << "[pipewire] DMA-BUF offer="sv << (use_dmabuf ? "yes"sv : "no"sv)
                         << " formats="sv << n_dmabuf_infos
                         << " mem_type="sv << static_cast<int>(mem_type);
-        if (use_dmabuf && mem_type == platf::mem_type_e::system) {
-          // Software encode cannot mmap AMD DCC/tiled buffers (EPERM in Distrobox)
-          // and GetTextureSubImage of those imports was all zeros. Prefer LINEAR
-          // so KWin does the detile for us.
-          uint64_t linear = DRM_FORMAT_MOD_LINEAR;
-          for (const auto &fmt : format_map) {
-            params[n_params++] = build_format_parameter(&pod_builder, width, height, target_framerate, fmt.pw_format, &linear, 1);
-          }
-          BOOST_LOG(info) << "[pipewire] Prefer LINEAR DMA-BUF for software encode"sv;
-        }
         if (use_dmabuf) {
           for (int i = 0; i < n_dmabuf_infos; i++) {
             auto format_param = build_format_parameter(&pod_builder, width, height, target_framerate, dmabuf_infos[i].format, dmabuf_infos[i].modifiers, dmabuf_infos[i].n_modifiers);
@@ -756,11 +758,10 @@ namespace pipewire {
       auto *d = static_cast<stream_data_t *>(user_data);
       d->pw_state = state;
       if (state == PW_STREAM_STATE_STREAMING) {
-        // AUTOCONNECT already linked. A second link-factory object fails with
-        // "unknown output port (null)" and can tear the probe stream down.
+        // AUTOCONNECT already linked. Do not create a second link-factory
+        // object: it fails with "unknown input/output port (null)" and can
+        // leave KWin producing only the first (cleared) buffer.
         d->link_requested = true;
-      } else if (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_CONNECTING) {
-        ensure_capture_link(d);
       }
 
       switch (state) {
@@ -889,6 +890,7 @@ namespace pipewire {
         if (n < 8) {
           BOOST_LOG(info) << "[pipewire] dma-buf fd="sv << d0->fd
                           << " size="sv << size << " stride="sv << (d0->chunk ? d0->chunk->stride : 0)
+                          << " modifier="sv << d->format.info.raw.modifier
                           << " mmap="sv << (cpu_copied ? "yes"sv : "no"sv)
                           << " synced="sv << synced
                           << " nonzero_sampled="sv << sampled << " n="sv << n;
@@ -1234,19 +1236,17 @@ namespace pipewire {
         static std::atomic<bool> software_dmabuf_probed {false};
         if (!software_dmabuf_probed.exchange(true)) {
           int best_nonzero = -1;
-          for (int attempt = 0; attempt < 4; ++attempt) {
+          for (int attempt = 0; attempt < 12; ++attempt) {
             std::shared_ptr<platf::img_t> probe_img;
             const pull_free_image_cb_t pull = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
               img_out = alloc_img();
               return static_cast<bool>(img_out);
             };
-            const auto st = snapshot(pull, probe_img, 400ms, true);
+            const auto st = snapshot(pull, probe_img, 250ms, true);
             int nonzero = 0;
             if (probe_img && probe_img->data) {
               const auto nbytes = static_cast<size_t>(std::max(probe_img->height, 0)) * static_cast<size_t>(std::max(probe_img->row_pitch, 0));
-              for (size_t i = 0; i < nbytes; ++i) {
-                nonzero += probe_img->data[i] != 0;
-              }
+              nonzero = static_cast<int>(count_nonzero_samples(probe_img->data, nbytes));
             }
             BOOST_LOG(info) << "[pipewire] software DMA-BUF probe snapshot status="sv << std::to_underlying(st)
                             << " nonzero="sv << nonzero << " attempt="sv << attempt;
@@ -1392,19 +1392,27 @@ namespace pipewire {
         img_egl->reset();
         pipewire.fill_img(img_egl);
 
+        const auto nbytes = static_cast<size_t>(std::max(img_egl->height, 0)) * static_cast<size_t>(std::max(img_egl->row_pitch, 0));
+        auto cpu_pixels = [&]() {
+          return img_egl->data && count_nonzero_samples(img_egl->data, nbytes) > 0;
+        };
+
         if (mem_type == platf::mem_type_e::system && img_egl->sd.fds[0] >= 0) {
-          if (pipewire.is_cpu_frame_valid()) {
-            // LINEAR DMA-BUF was already synced+mmap'd. EGL blit of the same
-            // KWin buffer returns zeros on this AMD/Distrobox path.
-            img_egl->reset();
-          } else if (copy_dmabuf_to_cpu(img_egl) != 0) {
-            img_egl->reset();
+          if (!(pipewire.is_cpu_frame_valid() && cpu_pixels())) {
+            copy_dmabuf_to_cpu(img_egl);
           }
+          img_egl->reset();
         }
 
-        // Check if we got valid data (either DMA-BUF fd or memory pointer), then filter duplicates
-        if ((img_egl->sd.fds[0] >= 0 || img_egl->data != nullptr) && !is_buffer_redundant(img_egl)) {
-          // Update frame metadata
+        if (mem_type == platf::mem_type_e::system) {
+          // Give KWin the buffer back so the next vblank can be captured.
+          // The first DMA-BUF is often a cleared placeholder.
+          pipewire.release_current_buffer();
+          if (cpu_pixels() && !is_buffer_redundant(img_egl)) {
+            update_metadata(img_egl, retries);
+            return platf::capture_e::ok;
+          }
+        } else if ((img_egl->sd.fds[0] >= 0 || img_egl->data != nullptr) && !is_buffer_redundant(img_egl)) {
           update_metadata(img_egl, retries);
           return platf::capture_e::ok;
         }
