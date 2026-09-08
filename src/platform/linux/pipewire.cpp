@@ -392,39 +392,14 @@ namespace pipewire {
           n_params++;
         }
 
-        // PW_ID_ANY + TARGET_OBJECT (object.serial). Direct node-id connect hangs
-        // on PipeWire 1.4+. Give WirePlumber time to AUTOCONNECT before creating a
-        // link-factory object: an early failed link wedges the session manager and
-        // capture stays on dummy_img (black / skip:100%).
+        // PW_ID_ANY + TARGET_OBJECT (object.serial). Do not wait here: encoder
+        // probe and session start share this path, and a blocking wait made
+        // Moonlight connect/disconnect stall for seconds.
         const auto flags = static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS);
         BOOST_LOG(info) << "[pipewire] Connect PW stream PW_ID_ANY serial="sv << object_serial;
         result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, PW_ID_ANY, flags, params.data(), n_params);
         if (result < 0) {
           BOOST_LOG(error) << "[pipewire] pw_stream_connect failed: "sv << result << " ("sv << strerror(-result) << ")"sv;
-        } else {
-          auto wait_100ms = [&]() {
-            struct timespec abstime {};
-            clock_gettime(CLOCK_REALTIME, &abstime);
-            abstime.tv_nsec += 100000000;
-            if (abstime.tv_nsec >= 1000000000) {
-              abstime.tv_sec += 1;
-              abstime.tv_nsec -= 1000000000;
-            }
-            pw_thread_loop_timed_wait_full(loop, &abstime);
-          };
-          for (int i = 0; i < 8; ++i) {
-            if (stream_data.pw_state == PW_STREAM_STATE_STREAMING && stream_data.format_negotiated) {
-              break;
-            }
-            wait_100ms();
-          }
-          if (stream_data.pw_state != PW_STREAM_STATE_STREAMING) {
-            BOOST_LOG(warning) << "[pipewire] AUTOCONNECT did not reach STREAMING; trying link-factory"sv;
-            for (int i = 0; i < 8 && stream_data.pw_state != PW_STREAM_STATE_STREAMING; ++i) {
-              ensure_capture_link(&stream_data);
-              wait_100ms();
-            }
-          }
         }
       }
 
@@ -679,6 +654,9 @@ namespace pipewire {
 
       auto *d = static_cast<stream_data_t *>(user_data);
       d->pw_state = state;
+      if (state == PW_STREAM_STATE_STREAMING) {
+        ensure_capture_link(d);
+      }
 
       switch (state) {
         case PW_STREAM_STATE_PAUSED:

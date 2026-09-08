@@ -1666,13 +1666,11 @@ namespace dual_display {
       return virtual_display_available();
     }
 
-    // A named monitor, which must actually be attached. Checked rather than
-    // trusted: a name left in the config after the monitor was unplugged would
-    // otherwise advertise a capability that fails at capture, and a second
-    // stream that opens and never carries a frame is worse for the client than
-    // one that was never offered.
+    // A named monitor, which must actually be attached. The same output as
+    // primary is allowed so both streams can capture HDMI while we bring the
+    // virtual GamePad display back.
     const auto output = resolve_output(source);
-    return !output.empty() && output != primary_output();
+    return !output.empty();
   }
 
   std::unique_ptr<lease_t> acquire(const request_t &request) {
@@ -1688,15 +1686,18 @@ namespace dual_display {
     }
 
     const auto output = resolve_output(source);
-    if (output.empty() || output == primary_output()) {
-      if (!output.empty()) {
-        BOOST_LOG(warning) << "Second display source resolves to the primary output; refusing a duplicate stream"sv;
-      }
+    if (output.empty()) {
       return nullptr;
     }
 
-    BOOST_LOG(info) << "Second display: capturing "sv << output << " at "sv
-                    << request.width << 'x' << request.height << '@' << request.framerate;
+    if (output == primary_output()) {
+      BOOST_LOG(info) << "Second display: capturing primary output "sv << output
+                      << " again (duplicate stream) at "sv
+                      << request.width << 'x' << request.height << '@' << request.framerate;
+    } else {
+      BOOST_LOG(info) << "Second display: capturing "sv << output << " at "sv
+                      << request.width << 'x' << request.height << '@' << request.framerate;
+    }
     return std::make_unique<physical_lease_t>(output);
   }
 
