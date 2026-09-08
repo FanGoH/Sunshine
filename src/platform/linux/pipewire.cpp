@@ -3,6 +3,7 @@
  * @brief Shared classes for pipewire-based capture methods.
  */
 // standard includes
+#include <cinttypes>
 #include <fstream>
 
 // lib includes
@@ -325,8 +326,23 @@ namespace pipewire {
 
         struct pw_properties *props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE, "Screen", nullptr);
 
-        BOOST_LOG(debug) << "[pipewire] Create PW stream"sv;
+        // pw_stream_new takes ownership of props. TARGET_OBJECT must be set first:
+        // setting it afterwards is a no-op (or UAF), AUTOCONNECT to PW_ID_ANY then
+        // never links, and capture encodes dummy_img() black frames.
+        const bool have_serial = SUNSHINE_USE_PIPEWIRE_OBJECT_SERIAL && (object_serial & SPA_ID_INVALID) != SPA_ID_INVALID;
+        const bool have_node = node != PW_ID_ANY;
+        if (have_serial) {
+          pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%" PRIu64, object_serial);
+        } else if (have_node) {
+          pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%u", node);
+        }
+
+        BOOST_LOG(info) << "[pipewire] Create PW stream fd="sv << fd
+                        << " node="sv << node
+                        << " object_serial="sv << object_serial
+                        << " target="sv << (have_serial ? "serial"sv : (have_node ? "node"sv : "none"sv));
         stream_data.stream = pw_stream_new(core, "Sunshine Video Capture", props);
+        props = nullptr;
         pw_stream_add_listener(stream_data.stream, &stream_data.stream_listener, &stream_events, &stream_data);
 
         std::array<uint8_t, SPA_POD_BUFFER_SIZE> buffer;
@@ -357,22 +373,15 @@ namespace pipewire {
           n_params++;
         }
 
-        // Connection via pipewire object serial if it is supported and the serial is valid (lower 32-bits != SPA_ID_INVALID, see also PW_KEY_OBJECT_SERIAL docs)
-        if (SUNSHINE_USE_PIPEWIRE_OBJECT_SERIAL && (object_serial & SPA_ID_INVALID) != SPA_ID_INVALID) {
-          pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%" PRIu64, object_serial);
-          BOOST_LOG(debug) << "[pipewire] Connect PW stream - fd: "sv << fd << " object serial: "sv << object_serial;
-          result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, PW_ID_ANY, (enum pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params.data(), n_params);
-          if (result < 0) {
-            // Unset object serial for retry with node id
-            pw_properties_set(props, PW_KEY_TARGET_OBJECT, nullptr);
-          }
-        } else {
-          result = -1;  // Mark failed so we try to connect via node id
-        }
-        // Connection via legacy (and deprecated) pipewire node id
+        // Prefer the KWin node id. AUTOCONNECT + PW_ID_ANY returns 0 immediately even
+        // when no link is made, which previously skipped this fallback and left the
+        // stream stuck in "connecting".
+        const auto flags = static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS);
+        const uint32_t target_id = have_node ? node : PW_ID_ANY;
+        BOOST_LOG(info) << "[pipewire] Connect PW stream to target_id="sv << target_id;
+        result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, target_id, flags, params.data(), n_params);
         if (result < 0) {
-          BOOST_LOG(debug) << "[pipewire] Connect PW stream - fd: "sv << fd << " node: "sv << node;
-          result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, node, (enum pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params.data(), n_params);
+          BOOST_LOG(error) << "[pipewire] pw_stream_connect failed: "sv << result << " ("sv << strerror(-result) << ")"sv;
         }
       }
 
