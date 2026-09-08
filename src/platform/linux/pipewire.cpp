@@ -593,9 +593,9 @@ namespace pipewire {
     static void on_core_error_cb(void *user_data, const uint32_t id, const int seq, [[maybe_unused]] int res, const char *message) {
       BOOST_LOG(info) << "[pipewire] Pipewire Error, id:"sv << id << " seq:"sv << seq << " message: "sv << message;
       auto *d = static_cast<stream_data_t *>(user_data);
-      if (d && message && std::string_view(message).find("unknown input port") != std::string_view::npos) {
-        // Link-factory ran before the capture stream had a port. STREAMING and
-        // the connect wait loop retry once format/ports exist.
+      if (d && message && (std::string_view(message).find("unknown input port") != std::string_view::npos ||
+                           std::string_view(message).find("unknown output port") != std::string_view::npos)) {
+        // Ports lag PAUSED; STREAMING and the connect wait loop retry.
         d->link_requested = false;
       }
     }
@@ -628,8 +628,10 @@ namespace pipewire {
         BOOST_LOG(warning) << "[pipewire] capture link skipped: no KWin node id"sv;
         return;
       }
-      if (!d->format_negotiated) {
-        BOOST_LOG(info) << "[pipewire] capture link waiting for format (ports not ready, target="sv << d->target_node << ")"sv;
+      if (!d->format_negotiated || d->pw_state != PW_STREAM_STATE_STREAMING) {
+        BOOST_LOG(info) << "[pipewire] capture link waiting for STREAMING with format (target="sv
+                        << d->target_node << ", state="sv << pw_stream_state_as_string(d->pw_state)
+                        << ", format="sv << d->format_negotiated << ")"sv;
         return;
       }
       const uint32_t self_id = pw_stream_get_node_id(d->stream);
