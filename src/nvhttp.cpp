@@ -327,25 +327,27 @@ namespace nvhttp {
   }
 
   /**
-   * @brief Check whether a certificate exactly matches an enabled paired-client record.
+   * @brief Check whether a certificate matches an enabled paired-client record.
+   *
+   * Duplicate rows with the same certificate count as one identity. Re-pairing
+   * the same Moonlight client used to insert another copy and then fail HTTPS
+   * `pairchallenge` because this helper required exactly one match.
    *
    * @param certificate Parsed client certificate to compare by canonical X.509 identity.
-   * @return `true` only when exactly one matching paired-client record is enabled.
+   * @return `true` when at least one matching paired-client record is enabled.
    * @note The caller must hold `client_auth_mutex()`.
    */
   bool is_client_enabled(const X509 *certificate) {
-    bool matched = false;
     for (const auto &named_cert : client_root.named_devices) {
       if (auto stored_certificate = crypto::x509(named_cert.cert); !stored_certificate || X509_cmp(stored_certificate.get(), certificate) != 0) {
         continue;
       }
 
-      if (matched || !named_cert.enabled) {
-        return false;
+      if (named_cert.enabled) {
+        return true;
       }
-      matched = true;
     }
-    return matched;
+    return false;
   }
 
   /**
@@ -446,12 +448,27 @@ namespace nvhttp {
       return {};
     }
 
+    std::lock_guard lock {client_auth_mutex()};
+    for (auto &named_cert : client_root.named_devices) {
+      if (named_cert.cert == canonical_certificate) {
+        if (!name.empty()) {
+          named_cert.name = name;
+        }
+        named_cert.enabled = true;
+        rebuild_client_cert_chain();
+        if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
+          save_state();
+        }
+        return named_cert.uuid;
+      }
+    }
+
     named_cert_t named_cert;
     named_cert.name = name;
     named_cert.cert = std::move(canonical_certificate);
     named_cert.uuid = uuid_util::uuid_t::generate().string();
+    named_cert.enabled = true;
 
-    std::lock_guard lock {client_auth_mutex()};
     client_root.named_devices.emplace_back(std::move(named_cert));
     rebuild_client_cert_chain();
 
