@@ -115,6 +115,9 @@ namespace pipewire {
     struct pw_core *core = nullptr;  ///< PipeWire core used to create a fallback capture link.
     uint32_t target_node = PW_ID_ANY;  ///< KWin screencast node id for an explicit link-factory fallback.
     bool link_requested = false;  ///< Whether an explicit capture link has already been requested.
+    bool format_negotiated = false;  ///< Ports exist only after SPA_PARAM_Format.
+    int link_attempts = 0;  ///< link-factory tries; ports can lag the PAUSED state.
+    enum pw_stream_state pw_state = PW_STREAM_STATE_UNCONNECTED;  ///< Last stream state callback.
 
     stream_data_t():
         front_buffer(&buffer_a),
@@ -294,7 +297,7 @@ namespace pipewire {
           core = pw_context_connect(context, nullptr, 0);
         }
         if (core) {
-          pw_core_add_listener(core, &core_listener, &core_events, nullptr);
+          pw_core_add_listener(core, &core_listener, &core_events, &stream_data);
         } else {
           BOOST_LOG(debug) << "[pipewire] Failed to connect to PW core. Error: "sv << errno << "(" << strerror(errno) << ")"sv;
           return -1;
@@ -353,6 +356,9 @@ namespace pipewire {
         stream_data.core = core;
         stream_data.target_node = have_node ? node : PW_ID_ANY;
         stream_data.link_requested = false;
+        stream_data.format_negotiated = false;
+        stream_data.link_attempts = 0;
+        stream_data.pw_state = PW_STREAM_STATE_UNCONNECTED;
         pw_stream_add_listener(stream_data.stream, &stream_data.stream_listener, &stream_events, &stream_data);
 
         std::array<uint8_t, SPA_POD_BUFFER_SIZE> buffer;
@@ -392,7 +398,7 @@ namespace pipewire {
         if (result < 0) {
           BOOST_LOG(error) << "[pipewire] pw_stream_connect failed: "sv << result << " ("sv << strerror(-result) << ")"sv;
         } else {
-          for (int i = 0; i < 8 && !stream_data.link_requested; ++i) {
+          for (int i = 0; i < 20 && !stream_data.link_requested; ++i) {
             struct timespec abstime {};
             clock_gettime(CLOCK_REALTIME, &abstime);
             abstime.tv_nsec += 100000000;
@@ -584,8 +590,14 @@ namespace pipewire {
       BOOST_LOG(info) << "[pipewire] Connected to pipewire version "sv << pw_info->version;
     }
 
-    static void on_core_error_cb([[maybe_unused]] void *user_data, const uint32_t id, const int seq, [[maybe_unused]] int res, const char *message) {
+    static void on_core_error_cb(void *user_data, const uint32_t id, const int seq, [[maybe_unused]] int res, const char *message) {
       BOOST_LOG(info) << "[pipewire] Pipewire Error, id:"sv << id << " seq:"sv << seq << " message: "sv << message;
+      auto *d = static_cast<stream_data_t *>(user_data);
+      if (d && message && std::string_view(message).find("unknown input port") != std::string_view::npos) {
+        // Link-factory ran before the capture stream had a port. STREAMING and
+        // the connect wait loop retry once format/ports exist.
+        d->link_requested = false;
+      }
     }
 
     constexpr static const struct pw_core_events core_events = {
@@ -608,8 +620,16 @@ namespace pipewire {
       if (d->link_requested) {
         return;
       }
+      if (d->link_attempts >= 8) {
+        BOOST_LOG(error) << "[pipewire] capture link gave up after "sv << d->link_attempts << " tries"sv;
+        return;
+      }
       if (d->target_node == PW_ID_ANY) {
         BOOST_LOG(warning) << "[pipewire] capture link skipped: no KWin node id"sv;
+        return;
+      }
+      if (!d->format_negotiated) {
+        BOOST_LOG(info) << "[pipewire] capture link waiting for format (ports not ready, target="sv << d->target_node << ")"sv;
         return;
       }
       const uint32_t self_id = pw_stream_get_node_id(d->stream);
@@ -617,7 +637,6 @@ namespace pipewire {
         BOOST_LOG(info) << "[pipewire] capture link waiting for stream node id (target="sv << d->target_node << ")"sv;
         return;
       }
-      d->link_requested = true;
       char out_id[16];
       char in_id[16];
       std::snprintf(out_id, sizeof(out_id), "%u", d->target_node);
@@ -627,9 +646,12 @@ namespace pipewire {
         PW_KEY_LINK_INPUT_NODE, in_id,
         nullptr
       );
-      BOOST_LOG(info) << "[pipewire] Creating capture link "sv << d->target_node << " -> "sv << self_id;
+      BOOST_LOG(info) << "[pipewire] Creating capture link "sv << d->target_node << " -> "sv << self_id
+                      << " (state="sv << pw_stream_state_as_string(d->pw_state) << ")"sv;
       pw_core_create_object(d->core, "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK, &link_props->dict, 0);
       pw_properties_free(link_props);
+      d->link_requested = true;
+      d->link_attempts++;
     }
 
     static void on_stream_state_changed(void *user_data, enum pw_stream_state old, enum pw_stream_state state, const char *err_msg) {
@@ -642,7 +664,8 @@ namespace pipewire {
       }
 
       auto *d = static_cast<stream_data_t *>(user_data);
-      if (state == PW_STREAM_STATE_CONNECTING || state == PW_STREAM_STATE_PAUSED) {
+      d->pw_state = state;
+      if (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING) {
         ensure_capture_link(d);
       }
 
@@ -816,6 +839,8 @@ namespace pipewire {
       n_params++;
 
       pw_stream_update_params(d->stream, params.data(), n_params);
+      d->format_negotiated = true;
+      ensure_capture_link(d);
     }
 
     constexpr static const struct pw_stream_events stream_events = {
