@@ -432,9 +432,16 @@ namespace kwin {
             out_params = params_;
           }
         }
+        if (!output || !out_params) {
+          // Never capture HDMI (or whatever is first) when the GamePad
+          // output was requested. A missing Virtual-* used to duplicate
+          // the TV onto Thor's bottom panel.
+          BOOST_LOG(error) << "[kwingrab] requested output "sv << output_name
+                           << " is not attached; not falling back to another display"sv;
+          return -1;
+        }
       }
-      // Fall back to first element from the map in case of error
-      if (!output || !out_params) {
+      else {
         const auto output_ = outputs.begin();
         output = output_->first;
         out_params = output_->second;

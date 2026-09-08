@@ -1684,42 +1684,6 @@ namespace dual_display {
       return std::make_pair(width, height);
     }
 
-    [[nodiscard]] pid_t kwin_virtual_helper_pid() {
-      FILE *fp = popen("pidof -s sunshine-ds-virtual-output", "r");
-      if (!fp) {
-        return -1;
-      }
-      unsigned long pid = 0;
-      const int got = fscanf(fp, "%lu", &pid);
-      pclose(fp);
-      if (got != 1 || pid == 0) {
-        return -1;
-      }
-      return static_cast<pid_t>(pid);
-    }
-
-    void stop_kwin_virtual_helper(pid_t pid) {
-      if (pid <= 0) {
-        return;
-      }
-      kill(pid, SIGTERM);
-      const auto deadline = std::chrono::steady_clock::now() + 3s;
-      while (std::chrono::steady_clock::now() < deadline) {
-        int status = 0;
-        const auto waited = waitpid(pid, &status, WNOHANG);
-        if (waited == pid) {
-          return;
-        }
-        if (kill(pid, 0) != 0 && errno == ESRCH) {
-          return;
-        }
-        std::this_thread::sleep_for(50ms);
-      }
-      kill(pid, SIGKILL);
-      int status = 0;
-      waitpid(pid, &status, 0);
-    }
-
     [[nodiscard]] bool spawn_detached_kwin_virtual_helper(int width, int height) {
       auto lease = acquire_virtual_display({width, height, 60, {}});
       if (!lease) {
@@ -1732,33 +1696,31 @@ namespace dual_display {
     }
 
     /**
-     * @brief Recreate the playbook-owned KWin virtual output at a new size.
+     * @brief Ensure the playbook-owned KWin virtual output exists.
      *
-     * KScreen only has the mode the helper was created with, so a client that
-     * asks for Odin-native 1920×1080 cannot kscreen-doctor a 1080×1240 Thor
-     * GamePad panel. Restart the helper at the requested pixels and leave it
-     * running.
+     * KScreen only has the mode the helper was created with. A second client
+     * (Odin 1920×1080 vs Thor 1080×1240) must not SIGTERM that helper: tearing
+     * the output down disconnects every other session's PipeWire stream, and
+     * kwingrab used to fall back to HDMI-A-1 so Thor's GamePad panel showed
+     * the TV. Keep a live output and let the encoder scale.
      *
      * @return True when the named output exists at width×height afterwards.
      */
     [[nodiscard]] bool resize_named_kwin_virtual_output(const std::string &output, int width, int height) {
       const auto current = kscreen_output_size(output);
-      if (current && current->first == width && current->second == height) {
-        return true;
-      }
-
-      const int orig_w = current ? current->first : 0;
-      const int orig_h = current ? current->second : 0;
       if (current) {
-        BOOST_LOG(info) << "Second display: resizing "sv << output << " from "sv
-                        << orig_w << 'x' << orig_h << " to "sv << width << 'x' << height;
-      }
-      else {
-        BOOST_LOG(info) << "Second display: creating "sv << output << " at "sv
-                        << width << 'x' << height;
+        if (current->first == width && current->second == height) {
+          return true;
+        }
+        BOOST_LOG(info) << "Second display: keeping "sv << output << " at "sv
+                        << current->first << 'x' << current->second
+                        << " (client asked "sv << width << 'x' << height
+                        << "; will scale)"sv;
+        return false;
       }
 
-      stop_kwin_virtual_helper(kwin_virtual_helper_pid());
+      BOOST_LOG(info) << "Second display: creating "sv << output << " at "sv
+                      << width << 'x' << height;
       if (spawn_detached_kwin_virtual_helper(width, height)) {
         const auto now = kscreen_output_size(output);
         if (now && now->first == width && now->second == height) {
@@ -1768,9 +1730,6 @@ namespace dual_display {
 
       BOOST_LOG(warning) << "Second display: failed to size "sv << output << " to "sv
                          << width << 'x' << height;
-      if (orig_w > 0 && orig_h > 0) {
-        static_cast<void>(spawn_detached_kwin_virtual_helper(orig_w, orig_h));
-      }
       return false;
     }
 
