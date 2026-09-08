@@ -383,6 +383,16 @@ namespace pipewire {
         BOOST_LOG(info) << "[pipewire] DMA-BUF offer="sv << (use_dmabuf ? "yes"sv : "no"sv)
                         << " formats="sv << n_dmabuf_infos
                         << " mem_type="sv << static_cast<int>(mem_type);
+        if (use_dmabuf && mem_type == platf::mem_type_e::system) {
+          // Software encode cannot mmap AMD DCC/tiled buffers (EPERM in Distrobox)
+          // and GetTextureSubImage of those imports was all zeros. Prefer LINEAR
+          // so KWin does the detile for us.
+          uint64_t linear = DRM_FORMAT_MOD_LINEAR;
+          for (const auto &fmt : format_map) {
+            params[n_params++] = build_format_parameter(&pod_builder, width, height, target_framerate, fmt.pw_format, &linear, 1);
+          }
+          BOOST_LOG(info) << "[pipewire] Prefer LINEAR DMA-BUF for software encode"sv;
+        }
         if (use_dmabuf) {
           for (int i = 0; i < n_dmabuf_infos; i++) {
             auto format_param = build_format_parameter(&pod_builder, width, height, target_framerate, dmabuf_infos[i].format, dmabuf_infos[i].modifiers, dmabuf_infos[i].n_modifiers);
@@ -1251,7 +1261,9 @@ namespace pipewire {
         BOOST_LOG(info) << "[pipewire] DMA-BUF copied "sv << copy_w << "x"sv << copy_h
                         << " nonzero="sv << nonzero << "/"sv << nbytes
                         << " fourcc="sv << img->sd.fourcc << " modifier="sv << img->sd.modifier
-                        << " gl_err="sv << gl_err << " n="sv << n;
+                        << " gl_err="sv << gl_err
+                        << " renderer="sv << (gl::ctx.GetString ? reinterpret_cast<const char *>(gl::ctx.GetString(GL_RENDERER)) : "?")
+                        << " n="sv << n;
       }
 
       img->reset();
