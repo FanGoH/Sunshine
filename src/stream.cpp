@@ -2554,11 +2554,12 @@ namespace stream {
         session->client_unique_id,
       });
       if (!session->second_display) {
-        BOOST_LOG(error) << "GamePad-as-primary requested, but the second display could not be acquired"sv;
+        // `error` is already the recv_ping result in this function.
+        BOOST_LOG(warning) << "GamePad-as-primary requested, but the second display could not be acquired"sv;
         return;
       }
       capture_output = session->second_display->output_name();
-      BOOST_LOG(info) << "Primary stream: capturing GamePad display ["sv << capture_output << ']'sv;
+      BOOST_LOG(info) << "Primary stream: capturing GamePad display ["sv << capture_output << "]"sv;
     }
     video::capture(session->mail, session->config.monitor, session, capture_output);
   }
