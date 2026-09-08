@@ -4,9 +4,10 @@
  * stream_virtual_output creates the output and a PipeWire feed. Closing the
  * stream (or exiting) destroys only that output. Physical displays are untouched.
  *
- * KWin only advertises the protocol when a matching .desktop file exists:
- *   Exec=<absolute path of this binary>
- *   X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
+ * KWin 6.7 often replies "Could not find output" from workspace()->findOutput
+ * right after createVirtualOutput. The output still exists in KScreen. Hold
+ * the stream anyway; exiting disconnects Wayland and KWin removes the output.
+ * Then enable it with kscreen-doctor so a wl_output is published for capture.
  */
 #include "zkde-screencast-unstable-v1.h"
 
@@ -246,25 +247,64 @@ print_outputs(struct app *app, const char *label) {
   fprintf(stderr, "\n");
 }
 
+static bool
+name_is_new(struct app *app, const char *name, const char **before, int n_before) {
+  if (!name || !name[0]) {
+    return false;
+  }
+  for (int j = 0; j < n_before; ++j) {
+    if (strcmp(name, before[j]) == 0) {
+      return false;
+    }
+  }
+  (void) app;
+  return true;
+}
+
 static const char *
 pick_new_name(struct app *app, const char **before, int n_before, const char *requested) {
+  char virtual_name[NAME_LEN];
+  snprintf(virtual_name, sizeof(virtual_name), "Virtual-%s", requested);
   for (int i = 0; i < app->n_outputs; ++i) {
     const char *name = app->outputs[i].name;
-    if (!name[0]) {
-      continue;
+    if (name_is_new(app, name, before, n_before) && strcmp(name, virtual_name) == 0) {
+      return name;
     }
-    bool known = false;
-    for (int j = 0; j < n_before; ++j) {
-      if (strcmp(name, before[j]) == 0) {
-        known = true;
-        break;
-      }
+  }
+  for (int i = 0; i < app->n_outputs; ++i) {
+    const char *name = app->outputs[i].name;
+    if (name_is_new(app, name, before, n_before) && strcmp(name, requested) == 0) {
+      return name;
     }
-    if (!known) {
+  }
+  for (int i = 0; i < app->n_outputs; ++i) {
+    const char *name = app->outputs[i].name;
+    if (name_is_new(app, name, before, n_before)) {
       return name;
     }
   }
   return requested;
+}
+
+static bool
+kscreen_has_output(const char *needle) {
+  if (!needle || !needle[0]) {
+    return false;
+  }
+  FILE *pipe = popen("kscreen-doctor -o 2>/dev/null", "r");
+  if (!pipe) {
+    return false;
+  }
+  char buf[4096];
+  bool found = false;
+  while (fgets(buf, sizeof(buf), pipe)) {
+    if (strstr(buf, needle)) {
+      found = true;
+      break;
+    }
+  }
+  pclose(pipe);
+  return found;
 }
 
 static void
@@ -405,38 +445,60 @@ main(int argc, char **argv) {
     }
   }
 
+  /*
+   * KWin 6.7 creates the DRM virtual output, then immediately
+   * workspace()->findOutput() for the LogicalOutput. That lookup often
+   * fails with "Could not find output" even though KScreen already has
+   * Virtual-{name}. Exiting the helper disconnects Wayland and removes it.
+   */
+  char virtual_name[NAME_LEN];
+  snprintf(virtual_name, sizeof(virtual_name), "Virtual-%s", name);
   if (app.failed) {
-    fprintf(stderr, "KWin refused the virtual output: %s\n", app.error);
-    return 1;
-  }
-  if (!app.created) {
-    fprintf(stderr, "timed out waiting for virtual output stream\n");
-    return 1;
+    fprintf(stderr, "screencast failed: %s (holding stream; waiting for %s)\n", app.error, virtual_name);
+  } else if (!app.created) {
+    fprintf(stderr, "no created event yet; waiting for %s\n", virtual_name);
   }
 
-  /* New wl_output globals arrive after created. */
-  for (int i = 0; i < 20 && !app.stop; ++i) {
+  const char *resolved = NULL;
+  for (int i = 0; i < 80 && !app.stop && !app.closed; ++i) {
+    dispatch_timeout(&app, 100);
     wl_display_roundtrip(app.display);
-    bool named = false;
-    for (int j = 0; j < app.n_outputs; ++j) {
-      if (app.outputs[j].name[0] && strcmp(app.outputs[j].name, name) == 0) {
-        named = true;
-        break;
-      }
-    }
-    if (app.n_outputs > n_before || named) {
+    const char *from_wl = pick_new_name(&app, before, n_before, name);
+    if (app.n_outputs > n_before && from_wl && strcmp(from_wl, name) != 0) {
+      resolved = from_wl;
       break;
     }
-    dispatch_timeout(&app, 100);
+    if (kscreen_has_output(virtual_name)) {
+      resolved = virtual_name;
+      break;
+    }
   }
 
   print_outputs(&app, "outputs-after");
-  const char *resolved = pick_new_name(&app, before, n_before, name);
+  if (!resolved) {
+    resolved = pick_new_name(&app, before, n_before, name);
+  }
+  if (!kscreen_has_output(resolved) && app.n_outputs <= n_before) {
+    fprintf(stderr, "KWin never advertised a new output for %s\n", name);
+    return 1;
+  }
   printf("READY name=%s requested=%s %dx%d\n", resolved, name, width, height);
   fflush(stdout);
   fflush(stderr);
 
-  while (!app.stop && !app.closed && !app.failed) {
+  /* KWin 6.7 often leaves the new output connected-but-disabled until KScreen enables it.
+   * Enabling publishes the wl_output Sunshine's kwin grab needs. HDMI stays on. */
+  {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+      "kscreen-doctor output.%s.enable output.%s.position.1920,0 >/dev/null 2>&1",
+      resolved, resolved);
+    if (system(cmd) != 0) {
+      fprintf(stderr, "kscreen-doctor enable %s failed; enable it manually\n", resolved);
+    }
+  }
+
+  while (!app.stop && !app.closed) {
     if (dispatch_timeout(&app, 500) < 0) {
       break;
     }

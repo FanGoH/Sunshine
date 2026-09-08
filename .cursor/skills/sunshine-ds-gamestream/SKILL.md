@@ -33,7 +33,8 @@ If `lstart` is older than the binary mtime, the process does not have the latest
 
 This is the working GameStream baseline. Do not “improve” it unless the user asks.
 
-- Conf `~/.config/sunshine-ds-dev/sunshine/sunshine.conf`: `capture = kwin`, `encoder = software`, `hevc_mode = 1`, `av1_mode = 1`, `port = 48100`, `output_name = HDMI-A-1`. Dual stream is HDMI twice until `Virtual-sunshine-ds` exists.
+- Conf `~/.config/sunshine-ds-dev/sunshine/sunshine.conf`: `capture = kwin`, `encoder = software`, `hevc_mode = 1`, `av1_mode = 1`, `port = 48100`, `output_name = HDMI-A-1`. `dual_display_source = Virtual-sunshine-ds` when the helper is holding that output; otherwise HDMI twice.
+- Virtual GamePad panel: `/home/deck/.local/bin/sunshine-ds-virtual-output --name sunshine-ds --width 1080 --height 1240` must stay running. KWin 6.7 `stream_virtual_output` fails with `Could not find output`; the helper holds the stream anyway and `kscreen-doctor` enables `Virtual-sunshine-ds`. Killing the helper removes the output. Checkpoint rollback: `dual_display_source = HDMI-A-1` and stop the helper.
 - Start env: Distrobox `steamos-tools`, `CONFIGURATION_DIRECTORY=/home/deck/.config/sunshine-ds-dev`, `KWIN_WAYLAND_NO_PERMISSION_CHECKS=1`, `WAYLAND_DISPLAY=wayland-0`, `unset DISPLAY`.
 - After `/launch` the log must contain `Skipping encoder re-probe; using [software]` (not a vulkan/vaapi walk).
 - Capture health: `cpu frame type=2` + high `pixel_diffs`. Probe I-frame ~1KB / 0% coded is `dummy_img()`, ignore it.

@@ -106,6 +106,11 @@ KMS cannot see a KWin-only virtual monitor. Named existing outputs
 (`dual_display_source = Virtual-sunshine-ds`, or a second HDMI) work without
 creating anything, still with `capture = kwin`.
 
+On KWin 6.7, `stream_virtual_output` often fails immediately with
+`Could not find output` (`workspace()->findOutput` before the LogicalOutput
+exists). The helper must keep the Wayland stream open anyway, then enable the
+output with `kscreen-doctor`. Exiting the helper removes `Virtual-sunshine-ds`.
+
 ## Behavior without a supported source
 
 When the feature is disabled or no configured source is available,
