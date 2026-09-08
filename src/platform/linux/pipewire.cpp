@@ -10,8 +10,13 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <linux/dma-buf.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #include <tuple>
+#include <cerrno>
 
 // lib includes
 #include <gio/gio.h>
@@ -59,6 +64,71 @@ namespace {
   constexpr int MAX_PARAMS = 200;
   constexpr int MAX_DMABUF_FORMATS = 200;
   constexpr int MAX_DMABUF_MODIFIERS = 200;
+
+  bool dma_buf_sync(int fd, uint64_t flags) {
+    if (fd < 0) {
+      return false;
+    }
+    struct dma_buf_sync sync {};
+    sync.flags = flags;
+    int ret = 0;
+    do {
+      ret = ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+    } while (ret == -1 && (errno == EAGAIN || errno == EINTR));
+    return ret == 0;
+  }
+
+  void wait_dmabuf_fence(int fd) {
+    if (fd < 0) {
+      return;
+    }
+#ifdef DMA_BUF_IOCTL_EXPORT_SYNC_FILE
+    struct dma_buf_export_sync_file exp {};
+    exp.flags = DMA_BUF_SYNC_READ;
+    exp.fd = -1;
+    if (ioctl(fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exp) == 0 && exp.fd >= 0) {
+      struct pollfd pfd {};
+      pfd.fd = exp.fd;
+      pfd.events = POLLIN;
+      poll(&pfd, 1, 100);
+      close(exp.fd);
+    }
+#endif
+  }
+
+  // Wait for the producer GPU write, then start a CPU read. EXPORT_SYNC_FILE
+  // is the explicit-sync wait; DMA_BUF_IOCTL_SYNC also flushes CPU caches.
+  // Without this, mmap of KWin LINEAR DMA-BUF on AMD is all zeros.
+  bool wait_dmabuf_readable(int fd) {
+    wait_dmabuf_fence(fd);
+    return dma_buf_sync(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+  }
+
+  void dma_buf_sync_end(int fd) {
+    dma_buf_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+  }
+
+  size_t count_nonzero_samples(const uint8_t *p, size_t n) {
+    if (!p || n == 0) {
+      return 0;
+    }
+    const size_t chunk = std::min(n, static_cast<size_t>(4096));
+    size_t z = 0;
+    for (size_t i = 0; i < chunk; ++i) {
+      z += p[i] != 0;
+    }
+    if (n > chunk * 2) {
+      const auto *mid = p + (n / 2);
+      for (size_t i = 0; i < chunk; ++i) {
+        z += mid[i] != 0;
+      }
+      const auto *tail = p + (n - chunk);
+      for (size_t i = 0; i < chunk; ++i) {
+        z += tail[i] != 0;
+      }
+    }
+    return z;
+  }
 }  // namespace
 
 using namespace std::literals;
@@ -238,6 +308,10 @@ namespace pipewire {
      */
     bool is_frame_ready() const {
       return stream_data.frame_ready;
+    }
+
+    bool is_cpu_frame_valid() const {
+      return stream_data.cpu_frame_valid;
     }
 
     /**
@@ -476,10 +550,15 @@ namespace pipewire {
       img_descriptor->sd.height = d.format.info.raw.size.height;
       img_descriptor->sd.modifier = d.format.info.raw.modifier;
       img_descriptor->sd.fourcc = d.drm_format;
-      for (int i = 0; i < MIN(buf->n_datas, 4); i++) {
-        img_descriptor->sd.fds[i] = dup(buf->datas[i].fd);
-        img_descriptor->sd.pitches[i] = buf->datas[i].chunk->stride;
-        img_descriptor->sd.offsets[i] = buf->datas[i].chunk->offset;
+      int plane = 0;
+      for (uint32_t i = 0; i < buf->n_datas && plane < 4; ++i) {
+        if (buf->datas[i].type != SPA_DATA_DmaBuf || buf->datas[i].fd < 0) {
+          continue;
+        }
+        img_descriptor->sd.fds[plane] = dup(buf->datas[i].fd);
+        img_descriptor->sd.pitches[plane] = buf->datas[i].chunk ? buf->datas[i].chunk->stride : 0;
+        img_descriptor->sd.offsets[plane] = buf->datas[i].chunk ? buf->datas[i].chunk->offset : 0;
+        ++plane;
       }
     }
 
@@ -747,8 +826,10 @@ namespace pipewire {
         uint8_t *src = static_cast<uint8_t *>(d0->data);
         void *mapped = nullptr;
         size_t map_size = 0;
+        bool synced = false;
         if (src == nullptr && d0->fd >= 0 && size > 0) {
           map_size = d0->maxsize > 0 ? d0->maxsize : (offset + size);
+          synced = wait_dmabuf_readable(d0->fd);
           mapped = mmap(nullptr, map_size, PROT_READ, MAP_SHARED, d0->fd, static_cast<off_t>(d0->mapoffset));
           if (mapped == MAP_FAILED) {
             mapped = mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, d0->fd, static_cast<off_t>(d0->mapoffset));
@@ -765,40 +846,52 @@ namespace pipewire {
             src = static_cast<uint8_t *>(mapped) + offset;
           }
         }
+        bool cpu_copied = false;
+        size_t sampled = 0;
+        if (src != nullptr && size > 0) {
+          if (d->back_buffer->size() < size) {
+            d->back_buffer->resize(size);
+          }
+          std::memcpy(d->back_buffer->data(), src, size);
+          cpu_copied = true;
+        }
+        if (synced) {
+          dma_buf_sync_end(d0->fd);
+        }
+        if (mapped != nullptr) {
+          munmap(mapped, map_size);
+          mapped = nullptr;
+        }
         {
           std::scoped_lock lock(d->frame_mutex);
           if (d->current_buffer) {
             pw_stream_queue_buffer(d->stream, d->current_buffer);
           }
-          d->current_buffer = b;
-          if (src != nullptr && size > 0) {
-            if (d->back_buffer->size() < size) {
-              d->back_buffer->resize(size);
-            }
-            std::memcpy(d->back_buffer->data(), src, size);
+          if (cpu_copied) {
             std::swap(d->front_buffer, d->back_buffer);
             d->local_stride = d0->chunk ? d0->chunk->stride : 0;
             d->cpu_frame_valid = true;
+            // Return the pw_buffer immediately so KWin can produce the next
+            // frame. Holding it made probe attempts 1-3 time out, and the
+            // later EGL import of an unsynced DMA-BUF overwrote pixels with zeros.
+            d->current_buffer = nullptr;
+            sampled = count_nonzero_samples(d->front_buffer->data(), d->front_buffer->size());
+          } else {
+            d->current_buffer = b;
           }
           d->frame_ready = true;
+        }
+        if (cpu_copied) {
+          pw_stream_queue_buffer(d->stream, b);
         }
         static std::atomic<int> dma {0};
         const int n = dma.fetch_add(1);
         if (n < 8) {
-          size_t nonzero = 0;
-          if (src != nullptr && size > 0) {
-            const auto ncheck = std::min(size, static_cast<size_t>(4096));
-            for (size_t i = 0; i < ncheck; ++i) {
-              nonzero += src[i] != 0;
-            }
-          }
           BOOST_LOG(info) << "[pipewire] dma-buf fd="sv << d0->fd
                           << " size="sv << size << " stride="sv << (d0->chunk ? d0->chunk->stride : 0)
-                          << " mmap="sv << (mapped ? "yes"sv : "no"sv)
-                          << " nonzero_head="sv << nonzero << " n="sv << n;
-        }
-        if (mapped != nullptr) {
-          munmap(mapped, map_size);
+                          << " mmap="sv << (cpu_copied ? "yes"sv : "no"sv)
+                          << " synced="sv << synced
+                          << " nonzero_sampled="sv << sampled << " n="sv << n;
         }
       }
       // 3. CPU path: MemPtr, or MemFd that MAP_BUFFERS did not map (common in Distrobox).
@@ -1183,6 +1276,8 @@ namespace pipewire {
         return -1;
       }
 
+      wait_dmabuf_fence(img->sd.fds[0]);
+
       auto *disp = std::get<0>(capture_egl_ctx.el);
       auto ctx = std::get<1>(capture_egl_ctx.el);
       if (!eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
@@ -1298,8 +1393,11 @@ namespace pipewire {
         pipewire.fill_img(img_egl);
 
         if (mem_type == platf::mem_type_e::system && img_egl->sd.fds[0] >= 0) {
-          if (copy_dmabuf_to_cpu(img_egl) != 0) {
-            // Keep the mmap CPU staging copy from fill_img; just drop the fds.
+          if (pipewire.is_cpu_frame_valid()) {
+            // LINEAR DMA-BUF was already synced+mmap'd. EGL blit of the same
+            // KWin buffer returns zeros on this AMD/Distrobox path.
+            img_egl->reset();
+          } else if (copy_dmabuf_to_cpu(img_egl) != 0) {
             img_egl->reset();
           }
         }
