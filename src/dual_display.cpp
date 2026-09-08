@@ -1526,7 +1526,11 @@ namespace dual_display {
     }
 
     /**
-     * @brief True when `needle` is an attached capture or KScreen output.
+     * @brief True when `needle` is an attached capture output.
+     *
+     * Do **not** call `kscreen-doctor`. Duplicate Virtual-* outputs make
+     * it hang, and the hang looks like a missing display so a second helper
+     * gets spawned. KWin `display_names` is enough.
      */
     [[nodiscard]] bool output_is_attached(const std::string &needle) {
       if (needle.empty()) {
@@ -1534,22 +1538,7 @@ namespace dual_display {
       }
 
       const auto outputs = platf::display_names(platf::mem_type_e::system);
-      if (std::find(std::begin(outputs), std::end(outputs), needle) != std::end(outputs)) {
-        return true;
-      }
-
-      auto *pipe = popen("kscreen-doctor -o 2>/dev/null", "r");
-      if (!pipe) {
-        return false;
-      }
-
-      std::string text;
-      std::array<char, 512> buf {};
-      while (fgets(buf.data(), static_cast<int>(buf.size()), pipe)) {
-        text.append(buf.data());
-      }
-      pclose(pipe);
-      return text.find(needle) != std::string::npos;
+      return std::find(std::begin(outputs), std::end(outputs), needle) != std::end(outputs);
     }
 
     [[nodiscard]] bool virtual_display_available() {
@@ -1605,14 +1594,21 @@ namespace dual_display {
 #endif
 
     [[nodiscard]] std::unique_ptr<lease_t> acquire_virtual_display(const request_t &request) {
+      const auto name = std::string {"sunshine-ds"};
+      const auto capture_name = "Virtual-" + name;
+      if (output_is_attached(capture_name) || output_is_attached(name)) {
+        const auto resolved = output_is_attached(capture_name) ? capture_name : name;
+        BOOST_LOG(info) << "Second display: reusing already-attached "sv << resolved
+                        << " (not spawning another helper)"sv;
+        return std::make_unique<physical_lease_t>(resolved);
+      }
+
       auto binary = virtual_output_helper_path();
       if (binary.empty()) {
         BOOST_LOG(warning) << "Virtual second display requested, but sunshine-ds-virtual-output is not installed"sv;
         return nullptr;
       }
 
-      const auto name = std::string {"sunshine-ds"};
-      const auto capture_name = "Virtual-" + name;
       const auto width = std::to_string(request.width);
       const auto height = std::to_string(request.height);
       const auto resolution = width + "x" + height;
@@ -1685,45 +1681,6 @@ namespace dual_display {
       return nullptr;
     }
 
-    [[nodiscard]] std::optional<std::pair<int, int>> kscreen_output_size(const std::string &name) {
-      FILE *fp = popen("kscreen-doctor -j 2>/dev/null", "r");
-      if (!fp) {
-        return std::nullopt;
-      }
-      std::string json;
-      char buf[4096];
-      while (fgets(buf, sizeof(buf), fp) != nullptr) {
-        json.append(buf);
-      }
-      pclose(fp);
-
-      const auto needle = "\"name\":\"" + name + "\"";
-      const auto name_pos = json.find(needle);
-      if (name_pos == std::string::npos) {
-        return std::nullopt;
-      }
-      const auto next_name = json.find("\"name\":", name_pos + needle.size());
-      const auto search_end = next_name == std::string::npos ? json.size() : next_name;
-      const auto size_pos = json.find("\"size\":{", name_pos);
-      if (size_pos == std::string::npos || size_pos >= search_end) {
-        return std::nullopt;
-      }
-      const auto block = json.substr(size_pos, 96);
-      int width = 0;
-      int height = 0;
-      const auto wpos = block.find("\"width\":");
-      const auto hpos = block.find("\"height\":");
-      if (wpos == std::string::npos || hpos == std::string::npos) {
-        return std::nullopt;
-      }
-      width = atoi(block.c_str() + wpos + 8);
-      height = atoi(block.c_str() + hpos + 9);
-      if (width <= 0 || height <= 0) {
-        return std::nullopt;
-      }
-      return std::make_pair(width, height);
-    }
-
     [[nodiscard]] bool spawn_detached_kwin_virtual_helper(int width, int height) {
       auto lease = acquire_virtual_display({width, height, 60, {}});
       if (!lease) {
@@ -1738,34 +1695,26 @@ namespace dual_display {
     /**
      * @brief Ensure the playbook-owned KWin virtual output exists.
      *
-     * KScreen only has the mode the helper was created with. A second client
-     * (Odin 1920×1080 vs Thor 1080×1240) must not SIGTERM that helper: tearing
-     * the output down disconnects every other session's PipeWire stream, and
-     * kwingrab used to fall back to HDMI-A-1 so Thor's GamePad panel showed
-     * the TV. Keep a live output and let the encoder scale.
+     * A second client must not spawn another helper with the same name:
+     * duplicate Virtual-* outputs make kscreen-doctor hang, and kwingrab
+     * binds the last match (often an empty display → black GamePad stream
+     * while touch still hits the real window). Keep the live output and
+     * let the encoder scale.
      *
-     * @return True when the named output exists at width×height afterwards.
+     * @return True when the named output is attached afterwards.
      */
     [[nodiscard]] bool resize_named_kwin_virtual_output(const std::string &output, int width, int height) {
-      const auto current = kscreen_output_size(output);
-      if (current) {
-        if (current->first == width && current->second == height) {
-          return true;
-        }
-        BOOST_LOG(info) << "Second display: keeping "sv << output << " at "sv
-                        << current->first << 'x' << current->second
+      if (output_is_attached(output)) {
+        BOOST_LOG(info) << "Second display: keeping attached "sv << output
                         << " (client asked "sv << width << 'x' << height
-                        << "; will scale)"sv;
-        return false;
+                        << "; will scale, not spawn another helper)"sv;
+        return true;
       }
 
       BOOST_LOG(info) << "Second display: creating "sv << output << " at "sv
                       << width << 'x' << height;
-      if (spawn_detached_kwin_virtual_helper(width, height)) {
-        const auto now = kscreen_output_size(output);
-        if (now && now->first == width && now->second == height) {
-          return true;
-        }
+      if (spawn_detached_kwin_virtual_helper(width, height) && output_is_attached(output)) {
+        return true;
       }
 
       BOOST_LOG(warning) << "Second display: failed to size "sv << output << " to "sv
@@ -1773,34 +1722,6 @@ namespace dual_display {
       return false;
     }
 
-    class restoring_named_kwin_lease_t final: public lease_t {
-    public:
-      restoring_named_kwin_lease_t(std::string name, int orig_w, int orig_h, bool restore):
-          m_name {std::move(name)},
-          m_orig_w {orig_w},
-          m_orig_h {orig_h},
-          m_restore {restore} {
-      }
-
-      ~restoring_named_kwin_lease_t() override {
-        if (!m_restore || m_orig_w <= 0 || m_orig_h <= 0) {
-          return;
-        }
-        BOOST_LOG(info) << "Second display: restoring "sv << m_name << " to "sv
-                        << m_orig_w << 'x' << m_orig_h;
-        static_cast<void>(resize_named_kwin_virtual_output(m_name, m_orig_w, m_orig_h));
-      }
-
-      [[nodiscard]] std::string output_name() const override {
-        return m_name;
-      }
-
-    private:
-      std::string m_name;
-      int m_orig_w;
-      int m_orig_h;
-      bool m_restore;
-    };
 #else
     /**
      * @brief Report virtual-display availability on unsupported platforms.
@@ -1869,20 +1790,19 @@ namespace dual_display {
 
 #ifdef __linux__
     if (output.rfind("Virtual-", 0) == 0) {
-      const auto original = kscreen_output_size(output);
-      const bool already = original && original->first == request.width && original->second == request.height;
-      if (!already) {
-        if (!resize_named_kwin_virtual_output(output, request.width, request.height)) {
-          BOOST_LOG(warning) << "Second display: capturing "sv << output
-                             << " at its current mode and scaling to the client"sv;
-          return std::make_unique<physical_lease_t>(output);
-        }
+      if (output_is_attached(output)) {
+        BOOST_LOG(info) << "Second display: capturing existing "sv << output
+                        << " at "sv << request.width << 'x' << request.height << '@' << request.framerate
+                        << " (not spawning another helper; encoder will scale)"sv;
+        return std::make_unique<physical_lease_t>(output);
+      }
+      if (!resize_named_kwin_virtual_output(output, request.width, request.height)) {
+        BOOST_LOG(warning) << "Second display: "sv << output << " is not attached"sv;
+        return nullptr;
       }
       BOOST_LOG(info) << "Second display: capturing "sv << output << " at "sv
                       << request.width << 'x' << request.height << '@' << request.framerate;
-      const int orig_w = original ? original->first : 0;
-      const int orig_h = original ? original->second : 0;
-      return std::make_unique<restoring_named_kwin_lease_t>(output, orig_w, orig_h, !already);
+      return std::make_unique<physical_lease_t>(output);
     }
 #endif
 

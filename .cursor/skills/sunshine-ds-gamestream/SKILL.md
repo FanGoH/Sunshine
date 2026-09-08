@@ -72,6 +72,10 @@ If it returns, the running pid is older than the skip-reprobe / async-teardown i
 | `cpu frame type=2` + high `pixel_diffs` | SHM/MemFd is capturing |
 | DMA-BUF DCC modifier + mmap EPERM | Do not offer DMA-BUF for software encode |
 
+### Odin stacked GamePad is black, touch still works
+
+A second client joining a live Thor dual-stream must **not** spawn another `sunshine-ds-virtual-output --name sunshine-ds`. Duplicate `Virtual-sunshine-ds` outputs make `kscreen-doctor` hang and kwingrab binds the last (empty) output → black video, touch still works. Reuse the attached output and scale. Kill extra helper PIDs by number; keep the long-lived playbook helper.
+
 ### Ghost BUSY / wrong app
 
 Desktop placebo app stays BUSY until `POST /api/apps/close`. HTTPS `/cancel` needs client cert. Use Decky `lastAuthHeader`; CSRF skipped if no Origin/Referer. Playbook helper: `sunshine_close_app_via_api`. Do not tap a Low Res Desktop app unless asked.
@@ -128,4 +132,6 @@ Playbook: `scripts/ensure-cemu-dual-screen.sh` and `scripts/bind-gamepad.py cemu
 - Install Bazzite Eden reorder hooks
 - Hand-edit Cemu `controller0.xml` or copy mappings onto every `<controller>`
 - Kill `sunshine-ds-virtual-output` while dual-stream is the checkpoint
+- Spawn a second virtual-output helper named `sunshine-ds` while one is already attached
+- Call `kscreen-doctor` to decide whether `Virtual-sunshine-ds` exists (hangs with duplicates)
 - `pgrep -f` / `pkill -f` sunshine, or `pgrep -f` a command that contains `sunshine-ds-virtual-output`
