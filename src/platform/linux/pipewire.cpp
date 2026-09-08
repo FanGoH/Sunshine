@@ -15,6 +15,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <optional>
 #include <tuple>
 #include <cerrno>
 
@@ -128,6 +129,51 @@ namespace {
       }
     }
     return z;
+  }
+
+  gl::program_t *dmabuf_download_program() {
+    static std::optional<gl::program_t> prog;
+    static bool failed = false;
+    if (failed) {
+      return nullptr;
+    }
+    if (prog) {
+      return &*prog;
+    }
+    constexpr auto vs_src = R"(#version 330
+      const vec2 v[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+      out vec2 uv;
+      void main() {
+        gl_Position = vec4(v[gl_VertexID], 0.0, 1.0);
+        uv = v[gl_VertexID] * 0.5 + 0.5;
+      }
+    )";
+    constexpr auto fs_src = R"(#version 330
+      uniform sampler2D u_tex;
+      in vec2 uv;
+      out vec4 color;
+      void main() { color = texture(u_tex, uv); }
+    )";
+    auto vs = gl::shader_t::compile(vs_src, GL_VERTEX_SHADER);
+    if (!vs.has_left()) {
+      BOOST_LOG(error) << "[pipewire] DMA-BUF download VS: "sv << vs.right();
+      failed = true;
+      return nullptr;
+    }
+    auto fs = gl::shader_t::compile(fs_src, GL_FRAGMENT_SHADER);
+    if (!fs.has_left()) {
+      BOOST_LOG(error) << "[pipewire] DMA-BUF download FS: "sv << fs.right();
+      failed = true;
+      return nullptr;
+    }
+    auto linked = gl::program_t::link(vs.left(), fs.left());
+    if (!linked.has_left()) {
+      BOOST_LOG(error) << "[pipewire] DMA-BUF download link: "sv << linked.right();
+      failed = true;
+      return nullptr;
+    }
+    prog = std::move(linked.left());
+    return &*prog;
   }
 }  // namespace
 
@@ -1304,46 +1350,58 @@ namespace pipewire {
         return -1;
       }
 
-      // GetTextureSubImage on an imported DMA-BUF texture returns zeros on
-      // this AMD/Mesa + Distrobox path. Blit into a regular FBO first, which
-      // also waits on the implicit write fence.
-      GLuint src_fbo = 0;
+      // DCC/tiled DMA-BUF is not a valid blit source. Sample it into a
+      // linear FBO with a shader, then ReadPixels.
+      auto *download = dmabuf_download_program();
+      if (!download) {
+        return -1;
+      }
+
       GLuint dst_fbo = 0;
       GLuint dst_tex = 0;
-      gl::ctx.GenFramebuffers(1, &src_fbo);
+      GLuint vao = 0;
       gl::ctx.GenFramebuffers(1, &dst_fbo);
       gl::ctx.GenTextures(1, &dst_tex);
+      gl::ctx.GenVertexArrays(1, &vao);
       gl::ctx.BindTexture(GL_TEXTURE_2D, dst_tex);
       gl::ctx.TexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, copy_w, copy_h);
       gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
 
-      gl::ctx.BindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
-      gl::ctx.FramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rgb->tex[0], 0);
-      const auto src_status = gl::ctx.CheckFramebufferStatus(GL_READ_FRAMEBUFFER);
-      gl::ctx.BindFramebuffer(GL_DRAW_FRAMEBUFFER, dst_fbo);
-      gl::ctx.FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
-      const auto dst_status = gl::ctx.CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
-      if (src_status != GL_FRAMEBUFFER_COMPLETE || dst_status != GL_FRAMEBUFFER_COMPLETE) {
-        BOOST_LOG(error) << "[pipewire] DMA-BUF blit FBO incomplete src="sv << src_status << " dst="sv << dst_status
+      gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, dst_fbo);
+      gl::ctx.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
+      const auto dst_status = gl::ctx.CheckFramebufferStatus(GL_FRAMEBUFFER);
+      if (dst_status != GL_FRAMEBUFFER_COMPLETE) {
+        BOOST_LOG(error) << "[pipewire] DMA-BUF download FBO incomplete "sv << dst_status
                          << " fourcc="sv << img->sd.fourcc << " modifier="sv << img->sd.modifier;
         gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, 0);
-        gl::ctx.DeleteFramebuffers(1, &src_fbo);
         gl::ctx.DeleteFramebuffers(1, &dst_fbo);
         gl::ctx.DeleteTextures(1, &dst_tex);
+        gl::ctx.DeleteVertexArrays(1, &vao);
         return -1;
       }
 
-      gl::ctx.BlitFramebuffer(0, 0, copy_w, copy_h, 0, 0, copy_w, copy_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+      gl::ctx.Viewport(0, 0, copy_w, copy_h);
+      gl::ctx.UseProgram(download->handle());
+      gl::ctx.ActiveTexture(GL_TEXTURE0);
+      gl::ctx.BindTexture(GL_TEXTURE_2D, rgb->tex[0]);
+      gl::ctx.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      gl::ctx.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+      gl::ctx.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      gl::ctx.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      gl::ctx.BindVertexArray(vao);
+      gl::ctx.DrawArrays(GL_TRIANGLES, 0, 3);
       gl::ctx.Finish();
-      gl::ctx.BindFramebuffer(GL_READ_FRAMEBUFFER, dst_fbo);
       gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, img->row_pitch / std::max(img->pixel_pitch, 1));
       gl::ctx.ReadPixels(0, 0, copy_w, copy_h, GL_BGRA, GL_UNSIGNED_BYTE, img->data);
       gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, 0);
       const auto gl_err = gl::ctx.GetError();
+      gl::ctx.BindVertexArray(0);
+      gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
       gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, 0);
-      gl::ctx.DeleteFramebuffers(1, &src_fbo);
+      gl::ctx.UseProgram(0);
       gl::ctx.DeleteFramebuffers(1, &dst_fbo);
       gl::ctx.DeleteTextures(1, &dst_tex);
+      gl::ctx.DeleteVertexArrays(1, &vao);
 
       static std::atomic<int> copies {0};
       const int n = copies.fetch_add(1);
@@ -1781,16 +1839,29 @@ namespace pipewire {
 
         EGLint num_modifiers = 0;
         std::array<EGLuint64KHR, MAX_DMABUF_MODIFIERS> mods = {0};
-        eglQueryDmaBufModifiersEXT(egl_display, fmt.fourcc, MAX_DMABUF_MODIFIERS, mods.data(), nullptr, &num_modifiers);
+        std::array<EGLBoolean, MAX_DMABUF_MODIFIERS> external_only = {0};
+        eglQueryDmaBufModifiersEXT(egl_display, fmt.fourcc, MAX_DMABUF_MODIFIERS, mods.data(), external_only.data(), &num_modifiers);
 
         if (num_modifiers > MAX_DMABUF_MODIFIERS) {
           BOOST_LOG(warning) << "[pipewire] Some DMA-BUF modifiers are being ignored"sv;
         }
 
+        int n_ok = 0;
+        for (int i = 0; i < std::min(num_modifiers, MAX_DMABUF_MODIFIERS); ++i) {
+          if (external_only[i]) {
+            continue;
+          }
+          mods[n_ok++] = mods[i];
+        }
+        if (n_ok == 0) {
+          BOOST_LOG(warning) << "[pipewire] all modifiers are EXTERNAL_OES-only for format "sv << fmt.pw_format;
+          continue;
+        }
+
         dmabuf_infos[n_dmabuf_infos].format = fmt.pw_format;
-        dmabuf_infos[n_dmabuf_infos].n_modifiers = MIN(num_modifiers, MAX_DMABUF_MODIFIERS);
+        dmabuf_infos[n_dmabuf_infos].n_modifiers = n_ok;
         dmabuf_infos[n_dmabuf_infos].modifiers =
-          static_cast<uint64_t *>(g_memdup2(mods.data(), sizeof(uint64_t) * dmabuf_infos[n_dmabuf_infos].n_modifiers));
+          static_cast<uint64_t *>(g_memdup2(mods.data(), sizeof(uint64_t) * n_ok));
         ++n_dmabuf_infos;
       }
     }

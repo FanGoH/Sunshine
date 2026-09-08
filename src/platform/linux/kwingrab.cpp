@@ -398,7 +398,7 @@ namespace kwin {
         BOOST_LOG(error) << "[kwingrab] no wl_output found"sv;
         return -1;
       }
-      struct wl_output *output = nullptr;
+      struct wl_output *output [[maybe_unused]] = nullptr;
       if (!output_name.empty()) {
         for (auto const &[output_, params_] : outputs) {
           if (params_->name == output_name) {
@@ -414,9 +414,20 @@ namespace kwin {
         out_params = output_->second;
       }
 
-      // Request a stream for the chosen output with embedded cursor
+      // Request a stream for the chosen output with embedded cursor.
+      // Prefer stream_region so KWin re-renders the workspace into a fresh
+      // buffer instead of copying the output scanout FB (often empty on
+      // AMD DCC/GFX12). The region is the output's layout geometry.
       if (kde_screencast_v1_) {
-        kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_output(kde_screencast_v1_, output, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
+        kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_region(
+          kde_screencast_v1_,
+          out_params->pos_x,
+          out_params->pos_y,
+          static_cast<uint32_t>(std::max(out_params->width, 0)),
+          static_cast<uint32_t>(std::max(out_params->height, 0)),
+          wl_fixed_from_double(0.0),
+          ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED
+        );
         zkde_screencast_stream_unstable_v1_add_listener(kde_screencast_stream_v1_, &stream_listener, this);
       } else {
         // No screencast protocol found. Output an error based on newly initialized permission file.
