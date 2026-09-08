@@ -744,6 +744,12 @@ namespace pipewire {
             mapped = mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, d0->fd, static_cast<off_t>(d0->mapoffset));
           }
           if (mapped == MAP_FAILED) {
+            static std::atomic<int> mmap_fail {0};
+            if (mmap_fail.fetch_add(1) < 4) {
+              BOOST_LOG(info) << "[pipewire] dma-buf mmap failed fd="sv << d0->fd
+                              << " maxsize="sv << d0->maxsize << " mapoffset="sv << d0->mapoffset
+                              << " : "sv << strerror(errno);
+            }
             mapped = nullptr;
           } else {
             src = static_cast<uint8_t *>(mapped) + offset;
@@ -1119,6 +1125,19 @@ namespace pipewire {
         env_logical_height = 0;
         env_logical_width = 0;
         verify_and_update_display_parameters();
+      }
+
+      if (mem_type == platf::mem_type_e::system && capture_egl_ready) {
+        static std::atomic<bool> software_dmabuf_probed {false};
+        if (!software_dmabuf_probed.exchange(true)) {
+          std::shared_ptr<platf::img_t> probe_img;
+          const pull_free_image_cb_t pull = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
+            img_out = alloc_img();
+            return static_cast<bool>(img_out);
+          };
+          const auto st = snapshot(pull, probe_img, 500ms, true);
+          BOOST_LOG(info) << "[pipewire] software DMA-BUF probe snapshot status="sv << std::to_underlying(st);
+        }
       }
 
       return 0;
