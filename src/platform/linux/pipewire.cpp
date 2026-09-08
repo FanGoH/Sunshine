@@ -3,10 +3,13 @@
  * @brief Shared classes for pipewire-based capture methods.
  */
 // standard includes
+#include <atomic>
 #include <cinttypes>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <fstream>
+#include <sys/mman.h>
 
 // lib includes
 #include <gio/gio.h>
@@ -727,8 +730,10 @@ namespace pipewire {
         return;
       }
 
+      struct spa_data *d0 = &b->buffer->datas[0];
+
       // 2. Fast Path: DMA-BUF
-      if (b->buffer->datas[0].type == SPA_DATA_DmaBuf) {
+      if (d0->type == SPA_DATA_DmaBuf) {
         std::scoped_lock lock(d->frame_mutex);
         if (d->current_buffer) {
           pw_stream_queue_buffer(d->stream, d->current_buffer);
@@ -736,28 +741,55 @@ namespace pipewire {
         d->current_buffer = b;
         d->frame_ready = true;
       }
-      // 3. Optimized Path: Software/MemPtr
-      else if (b->buffer->datas[0].data != nullptr) {
-        size_t size = b->buffer->datas[0].chunk->size;
-
-        // Perform the copy to the BACK buffer while NOT holding the lock
-        if (d->back_buffer->size() < size) {
-          d->back_buffer->resize(size);
+      // 3. CPU path: MemPtr, or MemFd that MAP_BUFFERS did not map (common in Distrobox).
+      else {
+        size_t size = d0->chunk ? d0->chunk->size : 0;
+        size_t offset = d0->chunk ? d0->chunk->offset : 0;
+        uint8_t *src = static_cast<uint8_t *>(d0->data);
+        void *mapped = nullptr;
+        size_t map_size = 0;
+        if (src == nullptr && d0->fd >= 0 && (d0->type == SPA_DATA_MemFd || d0->type == SPA_DATA_MemPtr)) {
+          map_size = d0->maxsize > 0 ? d0->maxsize : (offset + size);
+          mapped = mmap(nullptr, map_size, PROT_READ, MAP_SHARED, d0->fd, static_cast<off_t>(d0->mapoffset));
+          if (mapped == MAP_FAILED) {
+            mapped = mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, d0->fd, static_cast<off_t>(d0->mapoffset));
+          }
+          if (mapped == MAP_FAILED) {
+            BOOST_LOG(error) << "[pipewire] mmap capture fd failed type="sv << d0->type
+                             << " fd="sv << d0->fd << " maxsize="sv << d0->maxsize
+                             << " : "sv << strerror(errno);
+            mapped = nullptr;
+          } else {
+            src = static_cast<uint8_t *>(mapped) + offset;
+          }
         }
-        std::memcpy(d->back_buffer->data(), b->buffer->datas[0].data, size);
-
-        {
-          // Lock only for the pointer swap and state update
-          std::scoped_lock lock(d->frame_mutex);
-          std::swap(d->front_buffer, d->back_buffer);
-
-          d->local_stride = b->buffer->datas[0].chunk->stride;
-          d->frame_ready = true;
-          d->current_buffer = b;
+        if (src != nullptr && size > 0) {
+          if (d->back_buffer->size() < size) {
+            d->back_buffer->resize(size);
+          }
+          std::memcpy(d->back_buffer->data(), src, size);
+          {
+            std::scoped_lock lock(d->frame_mutex);
+            std::swap(d->front_buffer, d->back_buffer);
+            d->local_stride = d0->chunk ? d0->chunk->stride : 0;
+            d->frame_ready = true;
+            d->current_buffer = b;
+          }
+          pw_stream_queue_buffer(d->stream, b);
+        } else {
+          static std::atomic<int> dropped {0};
+          const int n = dropped.fetch_add(1);
+          if (n < 8 || n % 120 == 0) {
+            BOOST_LOG(warning) << "[pipewire] dropped buffer type="sv << d0->type
+                               << " size="sv << size << " fd="sv << d0->fd
+                               << " data="sv << static_cast<const void *>(d0->data)
+                               << " n="sv << n;
+          }
+          pw_stream_queue_buffer(d->stream, b);
         }
-
-        // Release the PW buffer immediately after copy
-        pw_stream_queue_buffer(d->stream, b);
+        if (mapped != nullptr && mapped != MAP_FAILED) {
+          munmap(mapped, map_size);
+        }
       }
 
       d->frame_cv.notify_one();
