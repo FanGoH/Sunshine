@@ -4,6 +4,8 @@
  */
 // standard includes
 #include <cinttypes>
+#include <cstdio>
+#include <ctime>
 #include <fstream>
 
 // lib includes
@@ -11,6 +13,7 @@
 #include <gio/gunixfdlist.h>
 #include <libdrm/drm_fourcc.h>
 #include <pipewire/pipewire.h>
+#include <pipewire/link.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/video/type-info.h>
 #include <spa/pod/builder.h>
@@ -109,6 +112,9 @@ namespace pipewire {
     std::vector<uint8_t> *front_buffer;  ///< Staging buffer currently readable by `fill_img`.
     // Points to the buffer currently being written by on_process
     std::vector<uint8_t> *back_buffer;  ///< Staging buffer currently writable by PipeWire callbacks.
+    struct pw_core *core = nullptr;  ///< PipeWire core used to create a fallback capture link.
+    uint32_t target_node = PW_ID_ANY;  ///< KWin screencast node id for an explicit link-factory fallback.
+    bool link_requested = false;  ///< Whether an explicit capture link has already been requested.
 
     stream_data_t():
         front_buffer(&buffer_a),
@@ -331,18 +337,22 @@ namespace pipewire {
         // never links, and capture encodes dummy_img() black frames.
         const bool have_serial = SUNSHINE_USE_PIPEWIRE_OBJECT_SERIAL && (object_serial & SPA_ID_INVALID) != SPA_ID_INVALID;
         const bool have_node = node != PW_ID_ANY;
+        // PipeWire 1.4+ docs: TARGET_OBJECT must be object.serial or node.name.
+        // Passing a node id as target_id overwrites that property and WirePlumber
+        // looks up the wrong object, so the stream stays in "connecting".
         if (have_serial) {
           pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%" PRIu64, object_serial);
-        } else if (have_node) {
-          pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%u", node);
         }
 
         BOOST_LOG(info) << "[pipewire] Create PW stream fd="sv << fd
                         << " node="sv << node
                         << " object_serial="sv << object_serial
-                        << " target="sv << (have_serial ? "serial"sv : (have_node ? "node"sv : "none"sv));
+                        << " target="sv << (have_serial ? "serial"sv : (have_node ? "node-link"sv : "none"sv));
         stream_data.stream = pw_stream_new(core, "Sunshine Video Capture", props);
         props = nullptr;
+        stream_data.core = core;
+        stream_data.target_node = have_node ? node : PW_ID_ANY;
+        stream_data.link_requested = false;
         pw_stream_add_listener(stream_data.stream, &stream_data.stream_listener, &stream_events, &stream_data);
 
         std::array<uint8_t, SPA_POD_BUFFER_SIZE> buffer;
@@ -373,15 +383,24 @@ namespace pipewire {
           n_params++;
         }
 
-        // Prefer the KWin node id. AUTOCONNECT + PW_ID_ANY returns 0 immediately even
-        // when no link is made, which previously skipped this fallback and left the
-        // stream stuck in "connecting".
+        // PW_ID_ANY is required on PipeWire 1.4+. The KWin node is selected via
+        // TARGET_OBJECT (object.serial). If WirePlumber does not complete the
+        // link, on_stream_state_changed creates one with link-factory.
         const auto flags = static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS);
-        const uint32_t target_id = have_node ? node : PW_ID_ANY;
-        BOOST_LOG(info) << "[pipewire] Connect PW stream to target_id="sv << target_id;
-        result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, target_id, flags, params.data(), n_params);
+        BOOST_LOG(info) << "[pipewire] Connect PW stream PW_ID_ANY serial="sv << object_serial;
+        result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, PW_ID_ANY, flags, params.data(), n_params);
         if (result < 0) {
           BOOST_LOG(error) << "[pipewire] pw_stream_connect failed: "sv << result << " ("sv << strerror(-result) << ")"sv;
+        } else {
+          struct timespec abstime {};
+          clock_gettime(CLOCK_MONOTONIC, &abstime);
+          abstime.tv_nsec += 300000000;
+          if (abstime.tv_nsec >= 1000000000) {
+            abstime.tv_sec += 1;
+            abstime.tv_nsec -= 1000000000;
+          }
+          pw_thread_loop_timed_wait_full(loop, &abstime);
+          ensure_capture_link(&stream_data);
         }
       }
 
@@ -573,6 +592,36 @@ namespace pipewire {
       .error = on_core_error_cb,
     };
 
+    /**
+     * @brief Link the KWin screencast node to this capture stream.
+     *
+     * WirePlumber AUTOCONNECT cannot see KWin nodes with object.register=false,
+     * and a broken session manager leaves the stream in "connecting" forever.
+     * link-factory talks to the daemon directly.
+     */
+    static void ensure_capture_link(stream_data_t *d) {
+      if (!d || d->link_requested || !d->core || !d->stream || d->target_node == PW_ID_ANY) {
+        return;
+      }
+      const uint32_t self_id = pw_stream_get_node_id(d->stream);
+      if (self_id == SPA_ID_INVALID || self_id == PW_ID_ANY || self_id == 0) {
+        return;
+      }
+      d->link_requested = true;
+      char out_id[16];
+      char in_id[16];
+      std::snprintf(out_id, sizeof(out_id), "%u", d->target_node);
+      std::snprintf(in_id, sizeof(in_id), "%u", self_id);
+      struct pw_properties *link_props = pw_properties_new(
+        PW_KEY_LINK_OUTPUT_NODE, out_id,
+        PW_KEY_LINK_INPUT_NODE, in_id,
+        nullptr
+      );
+      BOOST_LOG(info) << "[pipewire] Creating capture link "sv << d->target_node << " -> "sv << self_id;
+      pw_core_create_object(d->core, "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK, &link_props->dict, 0);
+      pw_properties_free(link_props);
+    }
+
     static void on_stream_state_changed(void *user_data, enum pw_stream_state old, enum pw_stream_state state, const char *err_msg) {
       if (err_msg != nullptr) {
         BOOST_LOG(info) << "[pipewire] PipeWire stream error '" << err_msg << "' on state: " << pw_stream_state_as_string(old)
@@ -583,6 +632,9 @@ namespace pipewire {
       }
 
       auto *d = static_cast<stream_data_t *>(user_data);
+      if (state == PW_STREAM_STATE_CONNECTING || state == PW_STREAM_STATE_PAUSED) {
+        ensure_capture_link(d);
+      }
 
       switch (state) {
         case PW_STREAM_STATE_PAUSED:
