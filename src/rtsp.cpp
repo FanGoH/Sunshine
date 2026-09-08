@@ -1249,6 +1249,7 @@ namespace rtsp_stream {
     args.try_emplace("x-ss-video[0].chromaSamplingType"sv, "0"sv);
     args.try_emplace("x-ss-video[0].intraRefresh"sv, "0"sv);
     args.try_emplace("x-nv-video[0].clientRefreshRateX100"sv, "0"sv);
+    args.try_emplace("x-ml-video[0].source"sv, "primary"sv);
 
     /*
      * Defaults for the second display, so that not asking for one is free.
@@ -1375,6 +1376,18 @@ namespace rtsp_stream {
             config.monitor2 = monitor2;
           }
         }
+        }
+      }
+
+      const auto primary_source = args.find("x-ml-video[0].source"sv);
+      if (primary_source != std::end(args) && primary_source->second == "secondary"sv) {
+        if (config.monitor2) {
+          BOOST_LOG(info) << "Ignoring x-ml-video[0].source=secondary because video/1 is enabled"sv;
+        } else if (!dual_display::supported()) {
+          BOOST_LOG(warning) << "Client asked to capture the GamePad display as video/0, but none is available"sv;
+        } else {
+          config.primary_from_secondary = true;
+          BOOST_LOG(info) << "Primary stream will capture the GamePad display"sv;
         }
       }
 

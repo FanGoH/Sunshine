@@ -698,11 +698,13 @@ namespace video {
    * @param mail Session mail bus.
    * @param config Client-requested video configuration, normalized before capture begins.
    * @param channel_data Opaque channel data passed to packets.
+   * @param output_name When non-empty, pin capture to this output (GamePad as video/0).
    */
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    void *channel_data,
+    const std::string &output_name = {}
   );
 
   /**

@@ -74,6 +74,22 @@ a host must not start a second encoder because an old client sent
 A host that does not implement this ignores all five and streams one display. The
 client detects that from step 3.
 
+### GamePad as the only stream (Odin)
+
+A single-screen handheld that should show the virtual GamePad display, not the
+TV, still SETUPs `video/0/0` only and adds:
+
+```
+x-ml-video[0].source: secondary
+```
+
+Absent or `primary` keeps today's behaviour (capture the host primary output).
+`secondary` captures `dual_display_source` as video/0 and does not start a
+second encoder. If `x-ml-video[1].enable` is also set, video/1 wins and this
+attribute is ignored. A host that does not implement the attribute ignores it
+and streams the TV, which is why the setting lives in Moonlight DS as
+**GamePad only** and is paired with this fork.
+
 ### 3. The client sets up the second stream
 
 ```

@@ -2545,7 +2545,22 @@ namespace stream {
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
-    video::capture(session->mail, session->config.monitor, session);
+    std::string capture_output;
+    if (session->config.primary_from_secondary) {
+      session->second_display = dual_display::acquire({
+        session->config.monitor.width,
+        session->config.monitor.height,
+        session->config.monitor.framerate,
+        session->client_unique_id,
+      });
+      if (!session->second_display) {
+        BOOST_LOG(error) << "GamePad-as-primary requested, but the second display could not be acquired"sv;
+        return;
+      }
+      capture_output = session->second_display->output_name();
+      BOOST_LOG(info) << "Primary stream: capturing GamePad display ["sv << capture_output << ']'sv;
+    }
+    video::capture(session->mail, session->config.monitor, session, capture_output);
   }
 
   /**

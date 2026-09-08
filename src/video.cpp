@@ -3072,14 +3072,17 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    void *channel_data,
+    const std::string &output_name
   ) {
     config = resolve_dynamic_range(*chosen_encoder, config);
 
     auto idr_events = mail->event<bool>(mail::idr);
 
     idr_events->raise(true);
-    if (chosen_encoder->flags & PARALLEL_ENCODING) {
+    // A pinned GamePad-as-primary capture must not share the async thread
+    // (that thread follows the TV / display-switch hotkey).
+    if ((chosen_encoder->flags & PARALLEL_ENCODING) && output_name.empty()) {
       capture_async(std::move(mail), config, channel_data);
     } else {
       safe::signal_t join_event;
@@ -3097,6 +3100,7 @@ namespace video {
         .frame_nr = 1,
         .channel_data = channel_data,
         .propagate_failure = true,
+        .output_name_override = output_name,
       });
 
       // Wait for join signal

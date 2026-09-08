@@ -118,6 +118,14 @@ namespace stream {
      */
     std::optional<video::config_t> monitor2;
 
+    /**
+     * Capture the dual-display source (GamePad / virtual output) as video/0.
+     *
+     * Odin-style clients send `x-ml-video[0].source: secondary` and do not
+     * enable video/1, so this host must not encode the TV for them.
+     */
+    bool primary_from_secondary {};
+
     int packetsize;  ///< Maximum payload size for network packets.
     int minRequiredFecPackets;  ///< Minimum recovery packets required before FEC is emitted.
     int mlFeatureFlags;  ///< Moonlight feature flags negotiated for this session.
