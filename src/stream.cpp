@@ -2728,19 +2728,29 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      // The second capture thread ignores a primary-only failure, so it needs
+      // its own stop flag or it will reopen KWin/PipeWire during teardown.
+      if (session.mail) {
+        session.mail->event<bool>(mail::video2_shutdown)->raise(true);
+      }
     }
 
     /**
      * @brief Wait for worker threads owned by the session to exit.
      */
     void join(session_t &session) {
+      session.shutdown_event->raise(true);
+      if (session.mail) {
+        session.mail->event<bool>(mail::video2_shutdown)->raise(true);
+      }
+
       // Current Nvidia drivers have a bug where NVENC can deadlock the encoder thread with hardware-accelerated
-      // GPU scheduling enabled. If this happens, we will terminate ourselves and the service can restart.
-      // The alternative is that Sunshine can never start another session until it's manually restarted.
+      // GPU scheduling enabled. Upstream aborts the process so systemd can restart it. Dual-display KWin
+      // teardown can also miss that deadline (PipeWire/KWin stream_output waits up to 5s per attempt), and
+      // killing sunshine-ds leaves the next Moonlight connect on a dead port. Log and keep running instead.
       auto task = []() {
-        BOOST_LOG(fatal) << "Hang detected! Session failed to terminate in 10 seconds."sv;
+        BOOST_LOG(error) << "Session teardown exceeded 10 seconds; Sunshine will keep running"sv;
         logging::log_flush();
-        lifetime::debug_trap();
       };
       auto force_kill = task_pool.pushDelayed(task, 10s).task_id;
       auto fg = util::fail_guard([&force_kill]() {

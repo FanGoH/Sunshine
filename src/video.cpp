@@ -667,6 +667,15 @@ namespace video {
   }
 
   /**
+   * @brief True when this synchronized encoder should leave the capture loop.
+   */
+  bool sync_session_is_stopping(const sync_session_ctx_t &ctx) {
+    return ctx.shutdown_event->peek() ||
+           (ctx.stream_shutdown_event && ctx.stream_shutdown_event->peek()) ||
+           ctx.stop_requested;
+  }
+
+  /**
    * @brief Synchronization state for one encode session.
    */
   struct sync_session_t {
@@ -1758,6 +1767,7 @@ namespace video {
             // display_wp is modified in this thread only
             // Wait for the other shared_ptr's of display to be destroyed.
             // New displays will only be created in this thread.
+            auto wait_started = std::chrono::steady_clock::now();
             while (display_wp->use_count() != 1) {
               // Free images that weren't consumed by the encoders. These can reference the display and prevent
               // the ref count from reaching 1. We do this here rather than on the encoder thread to avoid race
@@ -1775,7 +1785,30 @@ namespace video {
                 ++capture_ctx;
               });
 
+              if (!capture_ctx_queue->running()) {
+                return;
+              }
+              if (capture_ctxs.empty() && !capture_ctx_queue->peek()) {
+                break;
+              }
+              if (std::chrono::steady_clock::now() - wait_started > 2s) {
+                BOOST_LOG(warning) << "Timed out waiting for display refcount to drop during capture reinit"sv;
+                break;
+              }
+
               std::this_thread::sleep_for(20ms);
+            }
+
+            if (capture_ctxs.empty() && !capture_ctx_queue->peek()) {
+              BOOST_LOG(info) << "Skipping capture reinit; no active encode sessions"sv;
+              disp.reset();
+              display_wp = disp;
+              reinit_event.reset();
+              auto next_capture_ctx = capture_ctx_queue->pop();
+              if (!next_capture_ctx) {
+                return;
+              }
+              capture_ctxs.emplace_back(std::move(*next_capture_ctx));
             }
 
             while (capture_ctx_queue->running()) {
@@ -2720,9 +2753,7 @@ namespace video {
 
     while (encode_session_ctx_queue.running()) {
       for (auto pos = std::begin(synced_session_ctxs); pos != std::end(synced_session_ctxs);) {
-        if ((*pos)->shutdown_event->peek() ||
-            ((*pos)->stream_shutdown_event && (*pos)->stream_shutdown_event->peek()) ||
-            (*pos)->stop_requested) {
+        if (sync_session_is_stopping(**pos)) {
           (*pos)->join_event->raise(true);
           pos = synced_session_ctxs.erase(pos);
         } else {
@@ -2802,9 +2833,7 @@ namespace video {
 
         KITTY_WHILE_LOOP(auto pos = std::begin(synced_sessions), pos != std::end(synced_sessions), {
           auto ctx = pos->ctx;
-          if (ctx->shutdown_event->peek() ||
-              (ctx->stream_shutdown_event && ctx->stream_shutdown_event->peek()) ||
-              ctx->stop_requested) {
+          if (sync_session_is_stopping(*ctx)) {
             // Let waiting thread know it can delete shutdown_event
             ctx->join_event->raise(true);
 
@@ -2870,6 +2899,17 @@ namespace video {
       };
 
       auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
+
+      // PipeWire reports a dead stream as reinit. Opening a new KWin screencast
+      // during session teardown blocks in wait_for_stream() for up to 5s per try
+      // and trips the session-join watchdog.
+      for (auto &ctx : synced_session_ctxs) {
+        if (sync_session_is_stopping(*ctx)) {
+          ctx->join_event->raise(true);
+          return encode_e::ok;
+        }
+      }
+
       switch (status) {
         case platf::capture_e::reinit:
         case platf::capture_e::error:
@@ -3109,7 +3149,14 @@ namespace video {
       .output_name_override = output_name,
     });
 
-    join_event.view();
+    auto shutdown_event = mail->event<bool>(mail::shutdown);
+    auto stream_shutdown = mail->event<bool>(mail::video2_shutdown);
+    while (!join_event.peek()) {
+      if (shutdown_event->peek() || (stream_shutdown && stream_shutdown->peek())) {
+        capture_context.encode_session_ctx_queue.stop();
+      }
+      join_event.view(200ms);
+    }
     capture_context.encode_session_ctx_queue.stop();
   }
 
