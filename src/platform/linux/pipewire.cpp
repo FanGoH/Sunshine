@@ -392,15 +392,17 @@ namespace pipewire {
         if (result < 0) {
           BOOST_LOG(error) << "[pipewire] pw_stream_connect failed: "sv << result << " ("sv << strerror(-result) << ")"sv;
         } else {
-          struct timespec abstime {};
-          clock_gettime(CLOCK_MONOTONIC, &abstime);
-          abstime.tv_nsec += 300000000;
-          if (abstime.tv_nsec >= 1000000000) {
-            abstime.tv_sec += 1;
-            abstime.tv_nsec -= 1000000000;
+          for (int i = 0; i < 8 && !stream_data.link_requested; ++i) {
+            struct timespec abstime {};
+            clock_gettime(CLOCK_REALTIME, &abstime);
+            abstime.tv_nsec += 100000000;
+            if (abstime.tv_nsec >= 1000000000) {
+              abstime.tv_sec += 1;
+              abstime.tv_nsec -= 1000000000;
+            }
+            pw_thread_loop_timed_wait_full(loop, &abstime);
+            ensure_capture_link(&stream_data);
           }
-          pw_thread_loop_timed_wait_full(loop, &abstime);
-          ensure_capture_link(&stream_data);
         }
       }
 
@@ -600,11 +602,19 @@ namespace pipewire {
      * link-factory talks to the daemon directly.
      */
     static void ensure_capture_link(stream_data_t *d) {
-      if (!d || d->link_requested || !d->core || !d->stream || d->target_node == PW_ID_ANY) {
+      if (!d || !d->core || !d->stream) {
+        return;
+      }
+      if (d->link_requested) {
+        return;
+      }
+      if (d->target_node == PW_ID_ANY) {
+        BOOST_LOG(warning) << "[pipewire] capture link skipped: no KWin node id"sv;
         return;
       }
       const uint32_t self_id = pw_stream_get_node_id(d->stream);
       if (self_id == SPA_ID_INVALID || self_id == PW_ID_ANY || self_id == 0) {
+        BOOST_LOG(info) << "[pipewire] capture link waiting for stream node id (target="sv << d->target_node << ")"sv;
         return;
       }
       d->link_requested = true;
