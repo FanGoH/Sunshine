@@ -389,16 +389,17 @@ namespace pipewire {
           n_params++;
         }
 
-        // PW_ID_ANY is required on PipeWire 1.4+. The KWin node is selected via
-        // TARGET_OBJECT (object.serial). If WirePlumber does not complete the
-        // link, on_stream_state_changed creates one with link-factory.
+        // PW_ID_ANY + TARGET_OBJECT (object.serial). Direct node-id connect hangs
+        // on PipeWire 1.4+. Give WirePlumber time to AUTOCONNECT before creating a
+        // link-factory object: an early failed link wedges the session manager and
+        // capture stays on dummy_img (black / skip:100%).
         const auto flags = static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS);
         BOOST_LOG(info) << "[pipewire] Connect PW stream PW_ID_ANY serial="sv << object_serial;
         result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, PW_ID_ANY, flags, params.data(), n_params);
         if (result < 0) {
           BOOST_LOG(error) << "[pipewire] pw_stream_connect failed: "sv << result << " ("sv << strerror(-result) << ")"sv;
         } else {
-          for (int i = 0; i < 20 && !stream_data.link_requested; ++i) {
+          auto wait_100ms = [&]() {
             struct timespec abstime {};
             clock_gettime(CLOCK_REALTIME, &abstime);
             abstime.tv_nsec += 100000000;
@@ -407,7 +408,19 @@ namespace pipewire {
               abstime.tv_nsec -= 1000000000;
             }
             pw_thread_loop_timed_wait_full(loop, &abstime);
-            ensure_capture_link(&stream_data);
+          };
+          for (int i = 0; i < 8; ++i) {
+            if (stream_data.pw_state == PW_STREAM_STATE_STREAMING && stream_data.format_negotiated) {
+              break;
+            }
+            wait_100ms();
+          }
+          if (stream_data.pw_state != PW_STREAM_STATE_STREAMING) {
+            BOOST_LOG(warning) << "[pipewire] AUTOCONNECT did not reach STREAMING; trying link-factory"sv;
+            for (int i = 0; i < 8 && stream_data.pw_state != PW_STREAM_STATE_STREAMING; ++i) {
+              ensure_capture_link(&stream_data);
+              wait_100ms();
+            }
           }
         }
       }
@@ -628,12 +641,8 @@ namespace pipewire {
         BOOST_LOG(warning) << "[pipewire] capture link skipped: no KWin node id"sv;
         return;
       }
-      if (!d->format_negotiated || d->pw_state != PW_STREAM_STATE_STREAMING) {
-        BOOST_LOG(info) << "[pipewire] capture link waiting for STREAMING with format (target="sv
-                        << d->target_node << ", state="sv << pw_stream_state_as_string(d->pw_state)
-                        << ", format="sv << d->format_negotiated << ")"sv;
-        return;
-      }
+      // Do not wait for STREAMING: that state needs a link, so gating on it
+      // deadlocks when AUTOCONNECT cannot see the KWin node.
       const uint32_t self_id = pw_stream_get_node_id(d->stream);
       if (self_id == SPA_ID_INVALID || self_id == PW_ID_ANY || self_id == 0) {
         BOOST_LOG(info) << "[pipewire] capture link waiting for stream node id (target="sv << d->target_node << ")"sv;
@@ -667,9 +676,6 @@ namespace pipewire {
 
       auto *d = static_cast<stream_data_t *>(user_data);
       d->pw_state = state;
-      if (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING) {
-        ensure_capture_link(d);
-      }
 
       switch (state) {
         case PW_STREAM_STATE_PAUSED:
@@ -842,7 +848,6 @@ namespace pipewire {
 
       pw_stream_update_params(d->stream, params.data(), n_params);
       d->format_negotiated = true;
-      ensure_capture_link(d);
     }
 
     constexpr static const struct pw_stream_events stream_events = {
