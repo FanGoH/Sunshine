@@ -150,6 +150,12 @@ namespace net {
   int encryption_mode_for_address(boost::asio::ip::address address);
 
   /**
+   * @brief Mark a file descriptor close-on-exec so children do not inherit it.
+   * @param fd File descriptor to mark. Negative values are ignored.
+   */
+  void set_cloexec(int fd);
+
+  /**
    * @brief Returns a string for use as the instance name for mDNS.
    * @param hostname The hostname to use for instance name generation.
    * @return Hostname-based instance name or "Sunshine" if hostname is invalid.

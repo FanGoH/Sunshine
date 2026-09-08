@@ -44,8 +44,10 @@
   #include <cerrno>
   #include <csignal>
   #include <cstdlib>
+  #include <dirent.h>
   #include <fcntl.h>
   #include <spawn.h>
+  #include <sys/socket.h>
   #include <sys/wait.h>
   #include <unistd.h>
 
@@ -1561,6 +1563,47 @@ namespace dual_display {
       return binary.find("krfb-virtualmonitor") != std::string::npos;
     }
 
+#ifdef __linux__
+    /**
+     * @brief Close inherited IPv4/IPv6 sockets in the virtual-output child.
+     *
+     * glibc here has no POSIX_SPAWN_CLOEXEC_DEFAULT. The helper only needs
+     * Wayland/DBus (AF_UNIX). If it inherits GameStream listen/UDP sockets and
+     * sunshine-ds later dies, :48100 stays held and the next DS cannot bind.
+     *
+     * @param actions posix_spawn file actions to append close operations to.
+     * @param keep_fd Descriptor to leave open in the child, or -1.
+     */
+    void addclose_inet_sockets(posix_spawn_file_actions_t *actions, int keep_fd) {
+      DIR *dir = opendir("/proc/self/fd");
+      if (!dir) {
+        BOOST_LOG(warning) << "Could not scan fds before spawning virtual-output helper"sv;
+        return;
+      }
+      const int dir_fd = dirfd(dir);
+      while (dirent *ent = readdir(dir)) {
+        char *end = nullptr;
+        const long fd_l = strtol(ent->d_name, &end, 10);
+        if (!end || *end != '\0' || fd_l < 0) {
+          continue;
+        }
+        const int fd = static_cast<int>(fd_l);
+        if (fd <= STDERR_FILENO || fd == keep_fd || fd == dir_fd) {
+          continue;
+        }
+        sockaddr_storage addr {};
+        socklen_t len = sizeof(addr);
+        if (getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) != 0) {
+          continue;
+        }
+        if (addr.ss_family == AF_INET || addr.ss_family == AF_INET6) {
+          posix_spawn_file_actions_addclose(actions, fd);
+        }
+      }
+      closedir(dir);
+    }
+#endif
+
     [[nodiscard]] std::unique_ptr<lease_t> acquire_virtual_display(const request_t &request) {
       auto binary = virtual_output_helper_path();
       if (binary.empty()) {
@@ -1600,11 +1643,8 @@ namespace dual_display {
 
       posix_spawnattr_t spawn_attr;
       posix_spawnattr_init(&spawn_attr);
-#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
-      // Resizing detaches this helper from the session. If it inherits
-      // GameStream listen sockets and sunshine-ds later dies, :48100/:48121
-      // stay held and the next DS cannot bind.
-      posix_spawnattr_setflags(&spawn_attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#ifdef __linux__
+      addclose_inet_sockets(&actions, logfd);
 #endif
 
       pid_t pid = -1;

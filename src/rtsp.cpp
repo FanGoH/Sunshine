@@ -575,6 +575,8 @@ namespace rtsp_stream {
         return -1;
       }
 
+      net::set_cloexec(acceptor.native_handle());
+
       next_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg) {
         handle_msg(sock, session, std::move(msg));
       });

@@ -2305,6 +2305,7 @@ namespace stream {
 
       return -1;
     }
+    net::set_cloexec(ctx.video_sock.native_handle());
 
     /*
      * The second display's socket.
@@ -2334,6 +2335,8 @@ namespace stream {
                            << "]: "sv << ec.message();
         boost::system::error_code close_ec;
         ctx.video_sock2.close(close_ec);
+      } else {
+        net::set_cloexec(ctx.video_sock2.native_handle());
       }
     }
 
@@ -2350,6 +2353,7 @@ namespace stream {
 
       return -1;
     }
+    net::set_cloexec(ctx.audio_sock.native_handle());
 
     ctx.message_queue_queue = std::make_shared<message_queue_queue_t::element_type>(30);
 

@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <sstream>
 
+#ifdef __linux__
+  #include <fcntl.h>
+#endif
+
 // local includes
 #include "config.h"
 #include "logging.h"
@@ -184,6 +188,19 @@ namespace net {
     }
   }
 
+  void set_cloexec(int fd) {
+#ifdef __linux__
+    if (fd < 0) {
+      return;
+    }
+    const int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0) {
+      fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    }
+#endif
+    (void) fd;
+  }
+
   /**
    * @brief Create an ENet host with the requested address family.
    */
@@ -198,18 +215,27 @@ namespace net {
     enet_address_set_port(&addr, port);
 
     // Maximum of 128 clients, which should be enough for anyone
-    auto host = host_t {enet_host_create(af == IPV4 ? AF_INET : AF_INET6, &addr, 128, 0, 0, 0)};
+    auto *raw = enet_host_create(af == IPV4 ? AF_INET : AF_INET6, &addr, 128, 0, 0, 0);
+    if (!raw) {
+      BOOST_LOG(error) << "Couldn't create ENet host on port ["sv << port << "] ("sv << bind_addr << ")"sv;
+      return {};
+    }
 
     // Enable opportunistic QoS tagging (automatically disables if the network appears to drop tagged packets)
-    enet_socket_set_option(host->socket, ENET_SOCKOPT_QOS, 1);
+    enet_socket_set_option(raw->socket, ENET_SOCKOPT_QOS, 1);
+    set_cloexec(raw->socket);
 
-    return host;
+    return host_t {raw};
   }
 
   /**
    * @brief Destroy an ENet host allocated by host_create().
    */
   void free_host(ENetHost *host) {
+    if (!host) {
+      return;
+    }
+
     std::for_each(host->peers, host->peers + host->peerCount, [](ENetPeer &peer_ref) {
       ENetPeer *peer = &peer_ref;
 
