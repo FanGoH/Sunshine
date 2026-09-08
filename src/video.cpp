@@ -3345,14 +3345,22 @@ namespace video {
 
     // Test HDR and YUV444 support
     {
-      auto test_yuv444 = [&](auto &flag_map, auto video_format) {
-        const config_t config = {1920, 1080, 60, 6000, 1000, 1, 0, 1, video_format, 0, 1};
-
-        reset_display(disp, encoder.platform_formats->dev_type, output_name, config);
+      // Encoder probe uses dummy_img(); KWin capture format does not change
+      // across these configs. Reuse the existing display so we do not pay a
+      // screencast create/destroy per codec (each teardown used to stall ~75s).
+      auto ensure_display = [&](const config_t &config) -> bool {
         if (!disp) {
+          reset_display(disp, encoder.platform_formats->dev_type, output_name, config);
+        }
+        return static_cast<bool>(disp);
+      };
+
+      auto test_yuv444 = [&](auto &flag_map, auto video_format) {
+        if (!flag_map[encoder_t::PASSED]) {
           return;
         }
-        if (!flag_map[encoder_t::PASSED]) {
+        const config_t config = {1920, 1080, 60, 6000, 1000, 1, 0, 1, video_format, 0, 1};
+        if (!ensure_display(config)) {
           return;
         }
 
@@ -3366,13 +3374,11 @@ namespace video {
       };
 
       auto test_yuv420_hdr = [&](auto &flag_map, auto video_format) {
-        const config_t config = {1920, 1080, 60, 6000, 1000, 1, 0, 3, video_format, 1, 0};
-
-        reset_display(disp, encoder.platform_formats->dev_type, output_name, config);
-        if (!disp) {
+        if (!flag_map[encoder_t::PASSED]) {
           return;
         }
-        if (!flag_map[encoder_t::PASSED]) {
+        const config_t config = {1920, 1080, 60, 6000, 1000, 1, 0, 3, video_format, 1, 0};
+        if (!ensure_display(config)) {
           return;
         }
 
@@ -3386,13 +3392,11 @@ namespace video {
       };
 
       auto test_yuv444_hdr = [&](auto &flag_map, auto video_format) {
-        const config_t config = {1920, 1080, 60, 6000, 1000, 1, 0, 3, video_format, 1, 1};
-
-        reset_display(disp, encoder.platform_formats->dev_type, output_name, config);
-        if (!disp) {
+        if (!flag_map[encoder_t::PASSED]) {
           return;
         }
-        if (!flag_map[encoder_t::PASSED]) {
+        const config_t config = {1920, 1080, 60, 6000, 1000, 1, 0, 3, video_format, 1, 1};
+        if (!ensure_display(config)) {
           return;
         }
 

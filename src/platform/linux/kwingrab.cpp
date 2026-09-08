@@ -271,12 +271,41 @@ namespace kwin {
   public:
     screencast_t &operator=(screencast_t &&) = delete;  // Do not allow to copying
 
-    ~screencast_t() {
-      // Release KDE screencast wayland extensions and reset pointers
-      if (kde_screencast_stream_v1_) {
-        zkde_screencast_stream_unstable_v1_close(kde_screencast_stream_v1_);
+    /**
+     * @brief Tell KWin to drop this screencast and flush the Close request.
+     *
+     * `close()` marshals with DESTROY, so the proxy is invalid afterwards.
+     * Without a flush, KWin never sees Close and holds the PipeWire node
+     * for ~75s — the gap between encoder-probe teardowns.
+     */
+    void close_stream() {
+      if (!kde_screencast_stream_v1_ || !wl_display) {
         kde_screencast_stream_v1_ = nullptr;
+        return;
       }
+      BOOST_LOG(info) << "[kwingrab] closing screencast stream"sv;
+      zkde_screencast_stream_unstable_v1_close(kde_screencast_stream_v1_);
+      kde_screencast_stream_v1_ = nullptr;
+      wl_display_flush(wl_display);
+
+      auto deadline = std::chrono::steady_clock::now() + 250ms;
+      while (std::chrono::steady_clock::now() < deadline) {
+        struct pollfd pfd {};
+        pfd.fd = wl_display_get_fd(wl_display);
+        pfd.events = POLLIN;
+        const int rc = poll(&pfd, 1, 50);
+        if (rc <= 0) {
+          break;
+        }
+        if ((pfd.revents & POLLIN) && wl_display_dispatch(wl_display) < 0) {
+          break;
+        }
+      }
+    }
+
+    ~screencast_t() {
+      close_stream();
+      // Release KDE screencast wayland extensions and reset pointers
       if (kde_screencast_v1_) {
         zkde_screencast_unstable_v1_destroy(kde_screencast_v1_);
         kde_screencast_v1_ = nullptr;
@@ -398,7 +427,7 @@ namespace kwin {
         BOOST_LOG(error) << "[kwingrab] no wl_output found"sv;
         return -1;
       }
-      struct wl_output *output [[maybe_unused]] = nullptr;
+      struct wl_output *output = nullptr;
       if (!output_name.empty()) {
         for (auto const &[output_, params_] : outputs) {
           if (params_->name == output_name) {
@@ -415,17 +444,10 @@ namespace kwin {
       }
 
       // Request a stream for the chosen output with embedded cursor.
-      // Prefer stream_region so KWin re-renders the workspace into a fresh
-      // buffer instead of copying the output scanout FB (often empty on
-      // AMD DCC/GFX12). The region is the output's layout geometry.
       if (kde_screencast_v1_) {
-        kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_region(
+        kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_output(
           kde_screencast_v1_,
-          out_params->pos_x,
-          out_params->pos_y,
-          static_cast<uint32_t>(std::max(out_params->width, 0)),
-          static_cast<uint32_t>(std::max(out_params->height, 0)),
-          wl_fixed_from_double(0.0),
+          output,
           ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED
         );
         zkde_screencast_stream_unstable_v1_add_listener(kde_screencast_stream_v1_, &stream_listener, this);
@@ -680,6 +702,16 @@ namespace kwin {
    */
   class kwin_t: public pipewire::pipewire_display_t {
   public:
+    ~kwin_t() {
+      // C++ would destroy `screencast` (KWin producer) before the base
+      // `pipewire` consumer. Close the consumer first, then flush Close
+      // so KWin drops the node immediately.
+      pipewire.shutdown();
+      if (screencast) {
+        screencast->close_stream();
+      }
+    }
+
     int configure_stream(const std::string &display_name, int &out_pipewire_fd, uint32_t &out_pipewire_node, uint64_t &out_pipewire_objectserial) override {
       screencast = std::make_unique<screencast_t>();
       if (screencast->init(true) < 0) {

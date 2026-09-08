@@ -131,6 +131,50 @@ namespace {
     return z;
   }
 
+  // Bytes can be almost all nonzero for a solid color (dark wallpaper, DCC
+  // import garbage). Encoder I-frames stay ~1KB until pixels actually vary.
+  size_t count_pixel_diffs(const uint8_t *p, size_t n) {
+    if (!p || n < 8) {
+      return 0;
+    }
+    const uint32_t first = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+                           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+    size_t diffs = 0;
+    const size_t step = 16;
+    for (size_t i = 4; i + 4 <= n; i += step) {
+      const uint32_t px = static_cast<uint32_t>(p[i]) | (static_cast<uint32_t>(p[i + 1]) << 8) |
+                          (static_cast<uint32_t>(p[i + 2]) << 16) | (static_cast<uint32_t>(p[i + 3]) << 24);
+      diffs += px != first;
+    }
+    return diffs;
+  }
+
+  void dump_bgra_ppm(const uint8_t *p, int width, int height, int stride, const char *path) {
+    if (!p || width <= 0 || height <= 0) {
+      return;
+    }
+    if (stride < width * 4) {
+      stride = width * 4;
+    }
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+      return;
+    }
+    fprintf(fp, "P6\n%d %d\n255\n", width, height);
+    for (int y = 0; y < height; ++y) {
+      const uint8_t *row = p + static_cast<size_t>(y) * static_cast<size_t>(stride);
+      for (int x = 0; x < width; ++x) {
+        const uint8_t b = row[x * 4 + 0];
+        const uint8_t g = row[x * 4 + 1];
+        const uint8_t r = row[x * 4 + 2];
+        fputc(r, fp);
+        fputc(g, fp);
+        fputc(b, fp);
+      }
+    }
+    fclose(fp);
+  }
+
   gl::program_t *dmabuf_download_program() {
     static std::optional<gl::program_t> prog;
     static bool failed = false;
@@ -242,6 +286,9 @@ namespace pipewire {
     enum pw_stream_state pw_state = PW_STREAM_STATE_UNCONNECTED;  ///< Last stream state callback.
 
     stream_data_t():
+        stream(nullptr),
+        current_buffer(nullptr),
+        drm_format(0),
         front_buffer(&buffer_a),
         back_buffer(&buffer_b) {}
   };
@@ -279,54 +326,71 @@ namespace pipewire {
   class pipewire_t {
   public:
     pipewire_t():
-        loop(pw_thread_loop_new("Pipewire thread", nullptr)) {
+        loop(pw_thread_loop_new("Pipewire thread", nullptr)),
+        context(nullptr),
+        core(nullptr),
+        fd(-1),
+        node(0),
+        object_serial(0),
+        stopped(false) {
       BOOST_LOG(debug) << "[pipewire] Start PW thread loop"sv;
       pw_thread_loop_start(loop);
     }
 
-    ~pipewire_t() {
-      BOOST_LOG(debug) << "[pipewire] Destroying pipewire_t"sv;
-      pw_thread_loop_lock(loop);
+    /**
+     * @brief Disconnect the PipeWire consumer before destroying KWin's producer.
+     *
+     * Must be called without holding the thread-loop lock. Destroying the
+     * stream while the loop is still running (and locked) deadlocks
+     * `pw_loop_invoke`, and closing KWin first leaves the node until a
+     * ~75s compositor timeout — encoder probe then blocks HTTP :48100.
+     */
+    void shutdown() {
+      if (!loop || stopped) {
+        return;
+      }
+      stopped = true;
+      BOOST_LOG(info) << "[pipewire] teardown begin"sv;
 
-      // Lock the frame mutex to stop fill_img
-      BOOST_LOG(debug) << "[pipewire] Stop fill_img"sv;
+      pw_thread_loop_lock(loop);
       {
         std::scoped_lock lock(stream_data.frame_mutex);
         stream_data.frame_ready = false;
+        stream_data.cpu_frame_valid = false;
         stream_data.current_buffer = nullptr;
       }
-
-      // Release pipewire stream
       if (stream_data.stream) {
-        BOOST_LOG(debug) << "[pipewire] Disconnect stream"sv;
         pw_stream_disconnect(stream_data.stream);
-        BOOST_LOG(debug) << "[pipewire] Destroy stream"sv;
+      }
+      pw_thread_loop_unlock(loop);
+
+      pw_thread_loop_stop(loop);
+
+      if (stream_data.stream) {
         pw_stream_destroy(stream_data.stream);
         stream_data.stream = nullptr;
       }
-      // Release pipewire core
       if (core) {
-        BOOST_LOG(debug) << "[pipewire] Disconnect PW core"sv;
         pw_core_disconnect(core);
         core = nullptr;
       }
-      // Release pipewire context
       if (context) {
-        BOOST_LOG(debug) << "[pipewire] Destroy PW context"sv;
         pw_context_destroy(context);
         context = nullptr;
       }
-      // Release pipewire file descriptor
       if (fd >= 0) {
-        BOOST_LOG(debug) << "[pipewire] Close pipewire_fd"sv;
         close(fd);
+        fd = -1;
       }
-      // Release pipewire thread loop
-      BOOST_LOG(debug) << "[pipewire] Stop PW thread loop"sv;
-      pw_thread_loop_unlock(loop);
-      pw_thread_loop_stop(loop);
-      BOOST_LOG(debug) << "[pipewire] Destroy PW thread loop"sv;
-      pw_thread_loop_destroy(loop);
+      BOOST_LOG(info) << "[pipewire] teardown end"sv;
+    }
+
+    ~pipewire_t() {
+      shutdown();
+      if (loop) {
+        pw_thread_loop_destroy(loop);
+        loop = nullptr;
+      }
     }
 
     /**
@@ -505,12 +569,13 @@ namespace pipewire {
         int n_params = 0;
         std::array<const struct spa_pod *, MAX_PARAMS> params;
 
-        // Prefer DMA-BUF whenever the compositor advertises modifiers — including
-        // software encode. KWin's MemFd/BGRA fallback is empty from Distrobox
-        // (MAP_BUFFERS leaves zeros), which encodes as skip:100% black frames.
-        // Hybrid Intel+NVIDIA CUDA still skips DMA-BUF: those fds are Intel and
-        // cannot be imported into CUDA.
+        // Software encode must not advertise DMA-BUF. KWin 6.7 on AMD GFX12
+        // then delivers DCC buffers; importing those as GL_TEXTURE_2D samples
+        // a solid color (~1KB I-frame / black Moonlight). MemFd is filled once
+        // the compositor FBO is healthy. Hardware encode still uses DMA-BUF.
+        // Hybrid Intel+NVIDIA CUDA still skips DMA-BUF: those fds are Intel.
         const bool use_dmabuf = n_dmabuf_infos > 0 &&
+                                mem_type != platf::mem_type_e::system &&
                                 (mem_type != platf::mem_type_e::cuda || display_is_nvidia);
         BOOST_LOG(info) << "[pipewire] DMA-BUF offer="sv << (use_dmabuf ? "yes"sv : "no"sv)
                         << " formats="sv << n_dmabuf_infos
@@ -670,12 +735,13 @@ namespace pipewire {
     struct pw_thread_loop *loop;
     struct pw_context *context;
     struct pw_core *core;
-    struct spa_hook core_listener;
+    struct spa_hook core_listener {};
     struct stream_data_t stream_data;
     int fd;
     uint32_t node;
     uint64_t object_serial;
     bool negotiate_maxframerate_ = true;
+    bool stopped = false;
 
     struct spa_pod *build_format_parameter(struct spa_pod_builder *b, uint32_t width, uint32_t height, AVRational target_framerate, int32_t format, uint64_t *modifiers, int n_modifiers) {
       struct spa_pod_frame object_frame;
@@ -986,9 +1052,20 @@ namespace pipewire {
             for (size_t i = 0; i < ncheck; ++i) {
               nonzero += p[i] != 0;
             }
+            const auto diffs = count_pixel_diffs(p, ncheck);
             BOOST_LOG(info) << "[pipewire] cpu frame type="sv << d0->type
                             << " size="sv << size << " stride="sv << (d0->chunk ? d0->chunk->stride : 0)
-                            << " nonzero="sv << nonzero << "/"sv << ncheck << " n="sv << n;
+                            << " nonzero="sv << nonzero << "/"sv << ncheck
+                            << " pixel_diffs="sv << diffs << " n="sv << n;
+            if (n == 0) {
+              dump_bgra_ppm(
+                p,
+                static_cast<int>(d->format.info.raw.size.width),
+                static_cast<int>(d->format.info.raw.size.height),
+                d0->chunk ? d0->chunk->stride : 0,
+                "/tmp/sunshine-ds-capture.ppm"
+              );
+            }
           }
           pw_stream_queue_buffer(d->stream, b);
         } else {
@@ -1411,12 +1488,17 @@ namespace pipewire {
         for (size_t i = 0; i < nbytes; ++i) {
           nonzero += img->data[i] != 0;
         }
+        const auto diffs = count_pixel_diffs(img->data, nbytes);
         BOOST_LOG(info) << "[pipewire] DMA-BUF copied "sv << copy_w << "x"sv << copy_h
                         << " nonzero="sv << nonzero << "/"sv << nbytes
+                        << " pixel_diffs="sv << diffs
                         << " fourcc="sv << img->sd.fourcc << " modifier="sv << img->sd.modifier
                         << " gl_err="sv << gl_err
                         << " renderer="sv << (gl::ctx.GetString ? reinterpret_cast<const char *>(gl::ctx.GetString(GL_RENDERER)) : "?")
                         << " n="sv << n;
+        if (n == 0) {
+          dump_bgra_ppm(img->data, copy_w, copy_h, img->row_pitch, "/tmp/sunshine-ds-capture.ppm");
+        }
       }
 
       img->reset();
