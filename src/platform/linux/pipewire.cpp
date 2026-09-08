@@ -3,6 +3,7 @@
  * @brief Shared classes for pipewire-based capture methods.
  */
 // standard includes
+#include <algorithm>
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <ctime>
 #include <fstream>
 #include <sys/mman.h>
+#include <tuple>
 
 // lib includes
 #include <gio/gio.h>
@@ -119,6 +121,7 @@ namespace pipewire {
     uint32_t target_node = PW_ID_ANY;  ///< KWin screencast node id for an explicit link-factory fallback.
     bool link_requested = false;  ///< Whether an explicit capture link has already been requested.
     bool format_negotiated = false;  ///< Ports exist only after SPA_PARAM_Format.
+    bool cpu_frame_valid = false;  ///< Whether `front_buffer` holds a copied CPU frame.
     int link_attempts = 0;  ///< link-factory tries; ports can lag the PAUSED state.
     enum pw_stream_state pw_state = PW_STREAM_STATE_UNCONNECTED;  ///< Last stream state callback.
 
@@ -370,13 +373,16 @@ namespace pipewire {
         int n_params = 0;
         std::array<const struct spa_pod *, MAX_PARAMS> params;
 
-        // Add preferred parameters for DMA-BUF with modifiers
-        // Use DMA-BUF for VAAPI, or for CUDA when the display GPU is NVIDIA (pure NVIDIA system).
-        // On hybrid GPU systems (Intel+NVIDIA), DMA-BUFs come from the Intel GPU and cannot
-        // be imported into CUDA, so we fall back to memory buffers in that case.
-        bool use_dmabuf = n_dmabuf_infos > 0 && (mem_type == platf::mem_type_e::vaapi ||
-                                                 mem_type == platf::mem_type_e::vulkan ||
-                                                 (mem_type == platf::mem_type_e::cuda && display_is_nvidia));
+        // Prefer DMA-BUF whenever the compositor advertises modifiers — including
+        // software encode. KWin's MemFd/BGRA fallback is empty from Distrobox
+        // (MAP_BUFFERS leaves zeros), which encodes as skip:100% black frames.
+        // Hybrid Intel+NVIDIA CUDA still skips DMA-BUF: those fds are Intel and
+        // cannot be imported into CUDA.
+        const bool use_dmabuf = n_dmabuf_infos > 0 &&
+                                (mem_type != platf::mem_type_e::cuda || display_is_nvidia);
+        BOOST_LOG(info) << "[pipewire] DMA-BUF offer="sv << (use_dmabuf ? "yes"sv : "no"sv)
+                        << " formats="sv << n_dmabuf_infos
+                        << " mem_type="sv << static_cast<int>(mem_type);
         if (use_dmabuf) {
           for (int i = 0; i < n_dmabuf_infos; i++) {
             auto format_param = build_format_parameter(&pod_builder, width, height, target_framerate, dmabuf_infos[i].format, dmabuf_infos[i].modifiers, dmabuf_infos[i].n_modifiers);
@@ -477,32 +483,40 @@ namespace pipewire {
       std::scoped_lock lock(stream_data.frame_mutex);
 
       if (stream_data.shared && stream_data.shared->stream_dead.load()) {
-        img->data = nullptr;
         close_img_fds(static_cast<egl::img_descriptor_t *>(img));
         pw_thread_loop_unlock(loop);
         return;
       }
 
-      if (!stream_data.current_buffer) {
-        img->data = nullptr;
+      auto *img_descriptor = static_cast<img_descriptor_t *>(img);
+
+      if (stream_data.current_buffer && stream_data.current_buffer->buffer->datas[0].type == SPA_DATA_DmaBuf) {
+        struct spa_buffer *buf = stream_data.current_buffer->buffer;
+        if (buf->datas[0].chunk && buf->datas[0].chunk->size != 0) {
+          fill_img_metadata(img_descriptor, buf);
+          fill_img_dmabuf(img_descriptor, buf, stream_data);
+        }
         pw_thread_loop_unlock(loop);
         return;
       }
 
-      struct spa_buffer *buf = stream_data.current_buffer->buffer;
-      if (buf->datas[0].chunk->size != 0) {
-        auto *img_descriptor = static_cast<img_descriptor_t *>(img);
-        fill_img_metadata(img_descriptor, buf);
-        if (buf->datas[0].type == SPA_DATA_DmaBuf) {
-          fill_img_dmabuf(img_descriptor, buf, stream_data);
-        } else {
-          img->data = stream_data.front_buffer->data();
-          img_descriptor->data_owned = false;
-          img->row_pitch = stream_data.local_stride;
-          // NV12 is the only 1-byte-per-pixel format delivered on the memory
-          // path; every other negotiated format is packed 4 bytes per pixel.
-          img->pixel_pitch = (stream_data.format.info.raw.format == SPA_VIDEO_FORMAT_NV12) ? 1 : 4;
+      // CPU path: copy from the staging vector. Do not inspect current_buffer —
+      // on_process already returned that pw_buffer to PipeWire.
+      if (stream_data.cpu_frame_valid && stream_data.front_buffer && !stream_data.front_buffer->empty() && img->data) {
+        const auto src_stride = stream_data.local_stride > 0 ? stream_data.local_stride : static_cast<size_t>(img->row_pitch);
+        const auto dst_stride = static_cast<size_t>(img->row_pitch);
+        const auto copy_w = std::min(src_stride, dst_stride);
+        const auto rows = std::max(img->height, 0);
+        const auto *src = stream_data.front_buffer->data();
+        const auto src_size = stream_data.front_buffer->size();
+        for (int y = 0; y < rows; ++y) {
+          const auto src_off = static_cast<size_t>(y) * src_stride;
+          if (src_off + copy_w > src_size) {
+            break;
+          }
+          std::memcpy(img->data + static_cast<size_t>(y) * dst_stride, src + src_off, copy_w);
         }
+        img_descriptor->pixel_pitch = (stream_data.format.info.raw.format == SPA_VIDEO_FORMAT_NV12) ? 1 : 4;
       }
 
       pw_thread_loop_unlock(loop);
@@ -655,6 +669,10 @@ namespace pipewire {
       auto *d = static_cast<stream_data_t *>(user_data);
       d->pw_state = state;
       if (state == PW_STREAM_STATE_STREAMING) {
+        // AUTOCONNECT already linked. A second link-factory object fails with
+        // "unknown output port (null)" and can tear the probe stream down.
+        d->link_requested = true;
+      } else if (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_CONNECTING) {
         ensure_capture_link(d);
       }
 
@@ -717,7 +735,16 @@ namespace pipewire {
           pw_stream_queue_buffer(d->stream, d->current_buffer);
         }
         d->current_buffer = b;
+        d->cpu_frame_valid = false;
         d->frame_ready = true;
+        static std::atomic<int> dma {0};
+        const int n = dma.fetch_add(1);
+        if (n < 8) {
+          BOOST_LOG(info) << "[pipewire] dma-buf fd="sv << d0->fd
+                          << " size="sv << (d0->chunk ? d0->chunk->size : 0)
+                          << " stride="sv << (d0->chunk ? d0->chunk->stride : 0)
+                          << " n="sv << n;
+        }
       }
       // 3. CPU path: MemPtr, or MemFd that MAP_BUFFERS did not map (common in Distrobox).
       else {
@@ -750,8 +777,22 @@ namespace pipewire {
             std::scoped_lock lock(d->frame_mutex);
             std::swap(d->front_buffer, d->back_buffer);
             d->local_stride = d0->chunk ? d0->chunk->stride : 0;
+            d->cpu_frame_valid = true;
+            d->current_buffer = nullptr;
             d->frame_ready = true;
-            d->current_buffer = b;
+          }
+          static std::atomic<int> copied {0};
+          const int n = copied.fetch_add(1);
+          if (n < 8) {
+            size_t nonzero = 0;
+            const auto *p = d->front_buffer->data();
+            const auto ncheck = std::min(d->front_buffer->size(), size);
+            for (size_t i = 0; i < ncheck; ++i) {
+              nonzero += p[i] != 0;
+            }
+            BOOST_LOG(info) << "[pipewire] cpu frame type="sv << d0->type
+                            << " size="sv << size << " stride="sv << (d0->chunk ? d0->chunk->stride : 0)
+                            << " nonzero="sv << nonzero << "/"sv << ncheck << " n="sv << n;
           }
           pw_stream_queue_buffer(d->stream, b);
         } else {
@@ -837,7 +878,7 @@ namespace pipewire {
         buffer_types |= 1 << SPA_DATA_DmaBuf;
       } else {
         BOOST_LOG(info) << "[pipewire] using memory buffers"sv;
-        buffer_types |= 1 << SPA_DATA_MemPtr;
+        buffer_types |= (1u << SPA_DATA_MemPtr) | (1u << SPA_DATA_MemFd);
       }
 
       // Ack the buffer type and metadata
@@ -1045,6 +1086,78 @@ namespace pipewire {
     }
 
     /**
+     * @brief Copy a PipeWire DMA-BUF into the software encoder's CPU image.
+     *
+     * KWin writes real pixels to DMA-BUF. The MemFd fallback is empty from
+     * Distrobox, so software encode has to import the GPU buffer like kmsgrab.
+     */
+    int copy_dmabuf_to_cpu(egl::img_descriptor_t *img) {
+      if (!img || img->sd.fds[0] < 0 || !img->data) {
+        return -1;
+      }
+      if (!capture_egl_ready) {
+        BOOST_LOG(error) << "[pipewire] software DMA-BUF copy needs an EGL context"sv;
+        return -1;
+      }
+
+      auto *disp = std::get<0>(capture_egl_ctx.el);
+      auto ctx = std::get<1>(capture_egl_ctx.el);
+      if (!eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
+        BOOST_LOG(error) << "[pipewire] eglMakeCurrent failed: "sv << util::hex(eglGetError()).to_string_view();
+        return -1;
+      }
+
+      auto rgb_opt = egl::import_source(capture_egl_display.get(), img->sd);
+      if (!rgb_opt) {
+        return -1;
+      }
+
+      auto &rgb = *rgb_opt;
+      gl::ctx.BindTexture(GL_TEXTURE_2D, rgb->tex[0]);
+      int tex_w = 0;
+      int tex_h = 0;
+      gl::ctx.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tex_w);
+      gl::ctx.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &tex_h);
+      const auto copy_w = std::min(img->width, std::max(tex_w, 0));
+      const auto copy_h = std::min(img->height, std::max(tex_h, 0));
+      if (copy_w <= 0 || copy_h <= 0) {
+        BOOST_LOG(error) << "[pipewire] DMA-BUF texture size "sv << tex_w << "x"sv << tex_h;
+        return -1;
+      }
+
+      const auto buf_bytes = static_cast<GLsizei>(img->height) * img->row_pitch;
+      if (gl::ctx.GetTextureSubImage) {
+        gl::ctx.GetTextureSubImage(rgb->tex[0], 0, 0, 0, 0, copy_w, copy_h, 1, GL_BGRA, GL_UNSIGNED_BYTE, buf_bytes, img->data);
+      } else {
+        GLuint fbo = 0;
+        gl::ctx.GenFramebuffers(1, &fbo);
+        gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl::ctx.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rgb->tex[0], 0);
+        gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, img->row_pitch / std::max(img->pixel_pitch, 1));
+        gl::ctx.ReadPixels(0, 0, copy_w, copy_h, GL_BGRA, GL_UNSIGNED_BYTE, img->data);
+        gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, 0);
+        gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl::ctx.DeleteFramebuffers(1, &fbo);
+      }
+      gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
+
+      static std::atomic<int> copies {0};
+      const int n = copies.fetch_add(1);
+      if (n < 8) {
+        size_t nonzero = 0;
+        const auto nbytes = static_cast<size_t>(copy_h) * static_cast<size_t>(img->row_pitch);
+        for (size_t i = 0; i < nbytes; ++i) {
+          nonzero += img->data[i] != 0;
+        }
+        BOOST_LOG(info) << "[pipewire] DMA-BUF copied "sv << copy_w << "x"sv << copy_h
+                        << " nonzero="sv << nonzero << "/"sv << nbytes << " n="sv << n;
+      }
+
+      img->reset();
+      return 0;
+    }
+
+    /**
      * @brief Capture a display frame into the provided image object.
      *
      * @param pull_free_image_cb Callback that provides an available image buffer.
@@ -1070,6 +1183,13 @@ namespace pipewire {
         auto *img_egl = static_cast<egl::img_descriptor_t *>(img_out.get());
         img_egl->reset();
         pipewire.fill_img(img_egl);
+
+        if (mem_type == platf::mem_type_e::system && img_egl->sd.fds[0] >= 0) {
+          if (copy_dmabuf_to_cpu(img_egl) != 0) {
+            retries++;
+            continue;
+          }
+        }
 
         // Check if we got valid data (either DMA-BUF fd or memory pointer), then filter duplicates
         if ((img_egl->sd.fds[0] >= 0 || img_egl->data != nullptr) && !is_buffer_redundant(img_egl)) {
@@ -1099,8 +1219,9 @@ namespace pipewire {
       img->row_pitch = img->pixel_pitch * width;
       img->sequence = 0;
       img->serial = std::numeric_limits<decltype(img->serial)>::max();
-      img->data = nullptr;
-      img->data_owned = false;
+      const auto bytes = static_cast<size_t>(std::max(img->height, 0)) * static_cast<size_t>(std::max(img->row_pitch, 0));
+      img->data = bytes > 0 ? new uint8_t[bytes]() : nullptr;
+      img->data_owned = img->data != nullptr;
       std::fill_n(img->sd.fds, 4, -1);
 
       return img;
@@ -1456,13 +1577,23 @@ namespace pipewire {
     }
 
     int get_dmabuf_modifiers() {
+      n_dmabuf_infos = 0;
+      capture_egl_ready = false;
+
       if (wl_display.init() < 0) {
         return -1;
       }
 
-      auto egl_display = egl::make_display(wl_display.get());
-      if (!egl_display) {
+      capture_egl_display = egl::make_display(wl_display.get());
+      if (!capture_egl_display) {
         return -1;
+      }
+
+      if (auto ctx_opt = egl::make_ctx(capture_egl_display.get())) {
+        capture_egl_ctx = std::move(*ctx_opt);
+        capture_egl_ready = true;
+      } else {
+        BOOST_LOG(warning) << "[pipewire] EGL context unavailable; software DMA-BUF copy disabled"sv;
       }
 
       // Detect if this is a pure NVIDIA system (not hybrid Intel+NVIDIA)
@@ -1488,7 +1619,7 @@ namespace pipewire {
           display_is_nvidia = false;
         } else {
           // No Intel GPU found, check if NVIDIA is present
-          const char *vendor = eglQueryString(egl_display.get(), EGL_VENDOR);
+          const char *vendor = eglQueryString(capture_egl_display.get(), EGL_VENDOR);
           if (vendor && std::string_view(vendor).contains("NVIDIA")) {
             BOOST_LOG(info) << "[pipewire] Pure NVIDIA system - DMA-BUF will be enabled for CUDA"sv;
             display_is_nvidia = true;
@@ -1497,7 +1628,7 @@ namespace pipewire {
       }
 
       if (eglQueryDmaBufFormatsEXT && eglQueryDmaBufModifiersEXT) {
-        query_dmabuf_formats(egl_display.get());
+        query_dmabuf_formats(capture_egl_display.get());
       }
 
       return 0;
@@ -1505,8 +1636,11 @@ namespace pipewire {
 
     platf::mem_type_e mem_type;
     wl::display_t wl_display;
+    egl::display_t capture_egl_display;
+    egl::ctx_t capture_egl_ctx;
+    bool capture_egl_ready = false;
     std::array<struct dmabuf_format_info_t, MAX_DMABUF_FORMATS> dmabuf_infos;
-    int n_dmabuf_infos;
+    int n_dmabuf_infos = 0;
     bool display_is_nvidia = false;  // Track if display GPU is NVIDIA
     std::chrono::nanoseconds delay;
     std::optional<std::uint64_t> last_pts {};
