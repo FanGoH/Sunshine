@@ -5,29 +5,42 @@ description: Diagnose SteamOS GameStream on sunshine-ds vs Decky Sunshine (black
 
 # sunshine-ds GameStream debug
 
-Read this before tracing capture or `/launch` from scratch. Host facts change; symptoms and recovery do not.
+Read this **before** tracing capture or `/launch` from scratch. Host uniqueids and LAN IPs live in gitignored `.env` / `rules_of_the_land.md` (this box: `~/.cursor/skills/sunshine-ds-gamestream/host.md`).
 
-## Two servers (do not mix)
+## Start here (do not rediscover)
 
-| | Decky Flatpak | Dev sunshine-ds |
-|---|---|---|
-| HTTP | `:47989` | `:48100` |
-| HTTPS | `:47984` | `:48095` |
-| Web UI | — | `:48101` |
-| RTSP | default | `:48121` |
-| uniqueid | `25450B84-9F6E-E308-6E9D-F07A25BD6CD2` | `E2C181AA-F002-A006-1D11-800D02FDBE7C` |
-| Capture | KMS (black on Plasma desktop) | `capture = kwin` |
-
-Thor must pin **`192.168.68.65:48100`** (or Tailscale `100.64.0.8:48100`). Hitting `:47989` is Decky KMS black.
+1. Confirm which HTTP the client hits. Decky Flatpak and dev sunshine-ds are different processes.
 
 ```bash
 curl -s --max-time 3 http://127.0.0.1:48100/serverinfo | grep -E 'uniqueid|currentgame|state'
 curl -s --max-time 3 http://127.0.0.1:47989/serverinfo | grep -E 'uniqueid|currentgame|state'
 ```
 
-Conf: `~/.config/sunshine-ds-dev/sunshine/sunshine.conf`  
-Binary: `/home/deck/.local/bin/sunshine-ds` (install from `~/code/sunshine-ds/build/sunshine`)  
-Do **not** replace Decky Sunshine. Do **not** `POST /api/restart`. Do **not** `sudo systemctl --user`.
+Thor must use the **dev** uniqueid / `:48100`. `:47989` is Decky KMS and is black on Plasma desktop.
+
+2. Confirm the **running** pid is the installed binary (`pgrep -x sunshine-ds` only — never `pgrep -f` / `pkill -f`):
+
+```bash
+ps -o pid,lstart,cmd -p "$(pgrep -x sunshine-ds)"
+ls -l /home/deck/.local/bin/sunshine-ds
+```
+
+If `lstart` is older than the binary mtime, the process does not have the latest fixes.
+
+3. Match the log to the table below. Apply that fix. Do not start a new capture theory.
+
+## Known-good checkpoint
+
+This is the working GameStream baseline. Do not “improve” it unless the user asks.
+
+- Conf `~/.config/sunshine-ds-dev/sunshine/sunshine.conf`: `capture = kwin`, `encoder = software`, `hevc_mode = 1`, `av1_mode = 1`, `port = 48100`, `output_name = HDMI-A-1`. Dual stream is HDMI twice until `Virtual-sunshine-ds` exists.
+- Start env: Distrobox `steamos-tools`, `CONFIGURATION_DIRECTORY=/home/deck/.config/sunshine-ds-dev`, `KWIN_WAYLAND_NO_PERMISSION_CHECKS=1`, `WAYLAND_DISPLAY=wayland-0`, `unset DISPLAY`.
+- After `/launch` the log must contain `Skipping encoder re-probe; using [software]` (not a vulkan/vaapi walk).
+- Capture health: `cpu frame type=2` + high `pixel_diffs`. Probe I-frame ~1KB / 0% coded is `dummy_img()`, ignore it.
+- Reconnect must keep the same pid. If log shows `drop_elevated_privileges` then `zkde_screencast_unstable_v1 not found`, that pid is dead for capture — restart DS.
+- Do **not** replace Decky Sunshine. Do **not** `POST /api/restart`. Do **not** `sudo systemctl --user`. Do **not** `kwin_wayland --replace`.
+
+Code that must stay in the running binary: skip software `ALWAYS_REPROBE` on `/launch`; flush KWin Close before PipeWire stop; async `pw_stream_destroy`; never `drop_elevated_privileges` after KWin was bound this process.
 
 ## Symptom → cause → fix
 
@@ -39,51 +52,36 @@ Do **not** replace Decky Sunshine. Do **not** `POST /api/restart`. Do **not** `s
 - then `zkde_screencast_unstable_v1 not found in registry`
 - then `Fatal: Unable to find display or encoder`
 
-Privilege drop is **process-wide**. That pid cannot capture again. `/serverinfo` can still be `FREE` on `:48100`.
-
-**Fix:** restart sunshine-ds (new pid). Do not keep talking to the poisoned process.
-
-Old binaries also re-probed `ALWAYS_REPROBE` software on every `/launch` (vulkan/vaapi/software), which is what triggered the drop. Current code logs `Skipping encoder re-probe; using [software]` and must **not** drop caps after KWin was already bound this process.
+Privilege drop is **process-wide**. `/serverinfo` can still be `FREE`. Restart sunshine-ds (new pid).
 
 ### “Starting Desktop” for ~75s
 
-Encoder probe created a KWin screencast, destructor did not flush Close before PipeWire stop, KWin held the node ~75s. HTTP `:48100` was down until probe finished, so clients fell through to Decky `:47989`.
+Encoder probe opened a KWin screencast; destructor did not Close before PipeWire stop; KWin held the node ~75s. DS HTTP was down, so clients fell through to Decky.
 
-**Fix already in tree:** Close+flush before PW stop; skip software re-probe when `encoder = software`; async `pw_stream_destroy`. If it returns, confirm the **running** pid started after that install (`ps -o lstart,cmd -p $(pgrep -x sunshine-ds)` vs `ls -l ~/.local/bin/sunshine-ds`).
+If it returns, the running pid is older than the skip-reprobe / async-teardown install.
 
 ### Black Moonlight / ~1KB I-frames
 
 | Check | Meaning |
 |---|---|
-| Spectacle screenshot all black | KWin screenshot/screencast FBO wedged. `qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.reinitialize`. Playbook: `scripts/ensure-kwin-screencast.sh`. **Never** `kwin_wayland --replace`. |
-| Probe I-frame ~1200 bytes / 0% coded | `dummy_img()`, not live capture health |
-| `cpu frame type=2` + high `pixel_diffs` | SHM/MemFd path is actually capturing |
+| Spectacle screenshot all black | KWin FBO wedged. `qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.reinitialize`. Playbook: `scripts/ensure-kwin-screencast.sh`. |
+| Probe I-frame ~1200 bytes / 0% coded | `dummy_img()`, not live capture |
+| `cpu frame type=2` + high `pixel_diffs` | SHM/MemFd is capturing |
 | DMA-BUF DCC modifier + mmap EPERM | Do not offer DMA-BUF for software encode |
-
-`encoder = software`, `hevc_mode = 1`, `av1_mode = 1`. Dual stream: HDMI-A-1 twice until `Virtual-sunshine-ds` exists (`createVirtualOutput` / helper `/home/deck/.local/bin/sunshine-ds-virtual-output`).
 
 ### Ghost BUSY / wrong app
 
-Desktop app id **881448767** is a placebo; stays BUSY until `POST /api/apps/close`. Do not tap Low Res Desktop `303580669`. HTTPS `/cancel` needs client cert. Use Decky `lastAuthHeader` (user `decky_sunshine`); CSRF skipped if no Origin/Referer. Playbook helper: `sunshine_close_app_via_api`.
+Desktop placebo app stays BUSY until `POST /api/apps/close`. HTTPS `/cancel` needs client cert. Use Decky `lastAuthHeader`; CSRF skipped if no Origin/Referer. Playbook helper: `sunshine_close_app_via_api`. Do not tap a Low Res Desktop app unless asked.
 
 ## Restart sunshine-ds
-
-Kill by **exact** name only:
 
 ```bash
 pgrep -x sunshine-ds   # never pgrep -f / pkill -f
 kill <pid>
-```
-
-Start inside Distrobox `steamos-tools` (Fedora 42):
-
-```bash
 podman exec --user 1000 -d steamos-tools bash -lc 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus PIPEWIRE_RUNTIME_DIR=/run/user/1000 CONFIGURATION_DIRECTORY=/home/deck/.config/sunshine-ds-dev HOME=/home/deck KWIN_WAYLAND_NO_PERMISSION_CHECKS=1; unset DISPLAY; exec /home/deck/.local/bin/sunshine-ds /home/deck/.config/sunshine-ds-dev/sunshine/sunshine.conf >> /home/deck/steamos-playbook/logs/sunshine-ds.log 2>&1'
 ```
 
-Wait until `:48100` `/serverinfo` is `SUNSHINE_SERVER_FREE` and uniqueid is the **dev** one. After `/launch`, log must contain `Skipping encoder re-probe` (not a full vulkan/vaapi walk).
-
-Build/install:
+Wait until `:48100` `/serverinfo` is `SUNSHINE_SERVER_FREE` with the **dev** uniqueid.
 
 ```bash
 podman exec --user 1000 steamos-tools ninja -C /home/deck/code/sunshine-ds/build -j2 sunshine
@@ -94,25 +92,18 @@ Over SSH: `export XDG_RUNTIME_DIR=/run/user/$(id -u)`.
 
 ## Client / protocol
 
-- Moonlight package `com.fangoh.moonlight.debug`. Thor wireless ADB `192.168.68.60:34151`. Phone `192.168.68.50`.
+- Moonlight DS package and Thor ADB: `rules_of_the_land.md` / `host.md`. Do not `adb kill-server`.
 - `/serverinfo` must advertise `<MaxVideoStreams>2</MaxVideoStreams>`.
 - SETUP `streamid=video/1/0` before ANNOUNCE.
-- Do not `adb kill-server`.
-- Distrobox Pulse often `Access denied` — DS audio may be missing; video can still work.
+- Distrobox Pulse often `Access denied` — video can work without DS audio.
 
 ## Capture smoke pages
 
-Served from `/tmp/sunshine-ds-smoke` on `http://127.0.0.1:18080` (also `tools/sunshine-ds-smoke/` in this repo).
+`/tmp/sunshine-ds-smoke` on `http://127.0.0.1:18080` (repo: `tools/sunshine-ds-smoke/`).
 
-- `primary.html` — HDMI 1920×1080, red, bouncing box + Gamepad API HUD
-- `gamepad.html` — second stream, blue, same HUD; left stick moves the box
-- Chrome: `gamepadconnected` is empty until a button press. Flatpak Chrome already has `devices=all`.
-
-```bash
-python3 -m http.server 18080 --bind 127.0.0.1 --directory /tmp/sunshine-ds-smoke
-# profiles: /tmp/sunshine-ds-smoke/chrome-primary2 and chrome-gamepad2
-# cache-bust: --app=http://127.0.0.1:18080/primary.html?m=$EPOCH
-```
+- `primary.html` — HDMI, red, bouncing box + Gamepad API HUD
+- `gamepad.html` — second stream, blue; left stick moves the box
+- Chrome Gamepad API is empty until a button press
 
 ## Do not
 
