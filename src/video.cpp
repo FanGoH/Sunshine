@@ -3444,9 +3444,16 @@ namespace video {
 
     auto encoder_list = encoders;
 
-    // If we already have a good encoder, check to see if another probe is required
-    if (chosen_encoder && !(chosen_encoder->flags & ALWAYS_REPROBE) && !platf::needs_encoder_reenumeration()) {
-      return 0;
+    // If we already have a good encoder, check to see if another probe is required.
+    // Software is ALWAYS_REPROBE (fallback), but a forced `encoder = software`
+    // already passed at startup. Re-creating a KWin screencast just to destroy
+    // it blocks /launch for ~75s, which Moonlight shows as "Starting Desktop".
+    if (chosen_encoder && !platf::needs_encoder_reenumeration()) {
+      const bool forced_match = !config::video.encoder.empty() && chosen_encoder->name == config::video.encoder;
+      if (!(chosen_encoder->flags & ALWAYS_REPROBE) || forced_match) {
+        BOOST_LOG(info) << "Skipping encoder re-probe; using ["sv << chosen_encoder->name << ']';
+        return 0;
+      }
     }
 
     // Restart encoder selection

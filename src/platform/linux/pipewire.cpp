@@ -10,6 +10,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <thread>
 #include <linux/dma-buf.h>
 #include <poll.h>
 #include <sys/ioctl.h>
@@ -364,33 +365,44 @@ namespace pipewire {
       }
       pw_thread_loop_unlock(loop);
 
-      pw_thread_loop_stop(loop);
+      // pw_stream_destroy / pw_core_disconnect block ~75s here. Do that off
+      // the /launch thread so Moonlight is not stuck on "Starting Desktop".
+      auto *loop_p = loop;
+      auto *stream_p = stream_data.stream;
+      auto *core_p = core;
+      auto *ctx_p = context;
+      const int fd_p = fd;
+      loop = nullptr;
+      stream_data.stream = nullptr;
+      core = nullptr;
+      context = nullptr;
+      fd = -1;
 
-      if (stream_data.stream) {
-        pw_stream_destroy(stream_data.stream);
-        stream_data.stream = nullptr;
-      }
-      if (core) {
-        pw_core_disconnect(core);
-        core = nullptr;
-      }
-      if (context) {
-        pw_context_destroy(context);
-        context = nullptr;
-      }
-      if (fd >= 0) {
-        close(fd);
-        fd = -1;
-      }
-      BOOST_LOG(info) << "[pipewire] teardown end"sv;
+      std::thread([loop_p, stream_p, core_p, ctx_p, fd_p]() {
+        if (loop_p) {
+          pw_thread_loop_stop(loop_p);
+        }
+        if (stream_p) {
+          pw_stream_destroy(stream_p);
+        }
+        if (core_p) {
+          pw_core_disconnect(core_p);
+        }
+        if (ctx_p) {
+          pw_context_destroy(ctx_p);
+        }
+        if (fd_p >= 0) {
+          close(fd_p);
+        }
+        if (loop_p) {
+          pw_thread_loop_destroy(loop_p);
+        }
+        BOOST_LOG(info) << "[pipewire] teardown end"sv;
+      }).detach();
     }
 
     ~pipewire_t() {
       shutdown();
-      if (loop) {
-        pw_thread_loop_destroy(loop);
-        loop = nullptr;
-      }
     }
 
     /**
