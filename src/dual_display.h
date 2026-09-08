@@ -38,8 +38,10 @@ namespace dual_display {
   /**
    * @brief A display being streamed as the second video stream.
    *
-   * Held for the life of a session. Destroying it releases whatever was
-   * acquired — a virtual monitor is removed, a real one is simply forgotten.
+   * Held for the life of a session. On Linux the singleton KWin virtual
+   * output stays up after the lease ends (HDMI is the physical TV; disconnect
+   * must not remove `Virtual-sunshine-ds`). Windows SudoVDA still removes a
+   * per-client virtual monitor when the second stream ends.
    */
   class lease_t {
   public:

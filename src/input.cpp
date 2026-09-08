@@ -1337,7 +1337,9 @@ namespace input {
 
     auto &gamepad = input->gamepads[client_index];
     if (gamepad.id >= 0) {
-      BOOST_LOG(warning) << "ControllerNumber already allocated ["sv << client_index << ']';
+      BOOST_LOG(info) << "ControllerNumber already allocated ["sv << client_index
+                      << "] for "sv << input->client_name
+                      << "; keeping global pad "sv << gamepad.id;
       return gamepad.id;
     }
 

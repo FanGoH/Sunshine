@@ -2812,6 +2812,11 @@ namespace stream {
         }
 
         platf::streaming_will_stop();
+      } else {
+        // Another client is still streaming. Drop only this client's pads
+        // so the remaining pad keeps its global slot. Do not revert the
+        // display topology — HDMI + the one virtual GamePad output stay.
+        input::terminate_gamepads(session.input_session_id);
       }
 
       BOOST_LOG(debug) << "Session ended"sv;

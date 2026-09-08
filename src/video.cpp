@@ -746,9 +746,13 @@ namespace video {
    */
   void end_capture_async(capture_thread_async_ctx_t &ctx);
 
+  int start_capture_sync2(capture_thread_sync_ctx_t &ctx);
+  void end_capture_sync2(capture_thread_sync_ctx_t &ctx);
+
   // Keep a reference counter to ensure the capture thread only runs when other threads have a reference to the capture thread
   auto capture_thread_async = safe::make_shared<capture_thread_async_ctx_t>(start_capture_async, end_capture_async);  ///< Capture thread async.
   auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);  ///< Capture thread sync.
+  auto capture_thread_sync2 = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync2, end_capture_sync2);  ///< Shared second-display capture.
 
 #ifdef _WIN32
   /**
@@ -2971,6 +2975,13 @@ namespace video {
     }
   }
 
+  void captureThreadSync2() {
+    auto ref = capture_thread_sync2.ref();
+    if (ref) {
+      captureThreadSyncFor(*ref.get(), "video::capture_sync2");
+    }
+  }
+
   /**
    * @brief Capture and encode video using the asynchronous capture thread.
    *
@@ -3118,29 +3129,24 @@ namespace video {
     idr_events->raise(true);
 
     /*
-     * Always the synchronous path, never the parallel one.
+     * Shared synchronous capture for the singleton virtual GamePad output.
      *
-     * `capture_async` drives the shared asynchronous capture thread, which holds
-     * a single display for every session queued on it. That is right for several
-     * clients watching one screen and wrong for this, where the entire point is a
-     * different screen -- routing a second display through it would silently
-     * stream the game's display twice.
-     *
-     * So this pins its own capture thread to its own output, regardless of what
-     * the encoder would have preferred. It costs the parallel encoder's
-     * throughput advantage on a stream that is usually a static desktop.
+     * `capture_async` holds the *game* display, so a second stream must not
+     * join it. A private capture thread per client used to open N KWin
+     * screencasts of the same Virtual-sunshine-ds and wedge PipeWire when
+     * Thor and Odin connected together. One capture thread fans frames out
+     * to every second-display encoder. Do not stop the shared queue when
+     * one client leaves — only that session's video2_shutdown flag.
      */
     safe::signal_t join_event;
-    capture_thread_sync_ctx_t capture_context;
-    std::jthread capture_thread {[&capture_context]() {
-      captureThreadSyncFor(capture_context, "video::capture_sync2");
-    }};
-    capture_context.encode_session_ctx_queue.raise(sync_session_ctx_t {
+    auto ref = capture_thread_sync2.ref();
+    if (!ref) {
+      return;
+    }
+    ref->encode_session_ctx_queue.raise(sync_session_ctx_t {
       .join_event = &join_event,
       .shutdown_event = mail->event<bool>(mail::shutdown),
       .stream_shutdown_event = mail->event<bool>(mail::video2_shutdown),
-      // The second display's own queue. `stream.cpp` runs a sender thread
-      // draining exactly this one.
       .packets = mail::man->queue<packet_t>(mail::video_packets2),
       .idr_events = std::move(idr_events),
       .invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames2),
@@ -3153,15 +3159,7 @@ namespace video {
       .output_name_override = output_name,
     });
 
-    auto shutdown_event = mail->event<bool>(mail::shutdown);
-    auto stream_shutdown = mail->event<bool>(mail::video2_shutdown);
-    while (!join_event.peek()) {
-      if (shutdown_event->peek() || (stream_shutdown && stream_shutdown->peek())) {
-        capture_context.encode_session_ctx_queue.stop();
-      }
-      join_event.view(200ms);
-    }
-    capture_context.encode_session_ctx_queue.stop();
+    join_event.view();
   }
 
   /**
@@ -3868,6 +3866,14 @@ namespace video {
    * @brief Stop capture sync processing.
    */
   void end_capture_sync(capture_thread_sync_ctx_t &ctx) {
+  }
+
+  int start_capture_sync2(capture_thread_sync_ctx_t &) {
+    std::jthread {&captureThreadSync2}.detach();
+    return 0;
+  }
+
+  void end_capture_sync2(capture_thread_sync_ctx_t &) {
   }
 
   /**

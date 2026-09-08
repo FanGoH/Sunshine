@@ -27,11 +27,14 @@
 #include <cwctype>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -1404,66 +1407,18 @@ namespace dual_display {
     }
 #elif defined(__linux__)
     /**
-     * @brief A compositor virtual output owned by `sunshine-ds-virtual-output`.
+     * @brief Linux DS owns at most one KWin virtual output.
      *
-     * KWin virtual monitors exist only in the compositor, so KMS cannot see
-     * them. Capture must use `capture = kwin`. Destroying the lease sends
-     * SIGTERM to the helper; the physical TV is never disabled.
+     * HDMI is the physical TV (also what Decky Sunshine captures). Azahar,
+     * Cemu, and other dual-screen mods use exactly one `Virtual-sunshine-ds`.
+     * The playbook helper holds that output for the life of the desktop
+     * session. GameStream leases are names only — disconnect must not
+     * SIGTERM the helper or spawn a second `--name sunshine-ds`.
      */
-    class kwin_virtual_lease_t: public lease_t {
-    public:
-      kwin_virtual_lease_t(pid_t pid, std::string name):
-          m_pid {pid},
-          m_name {std::move(name)} {
-      }
+    constexpr auto kwin_virtual_helper_name = "sunshine-ds"sv;
+    constexpr auto kwin_virtual_capture_name = "Virtual-sunshine-ds"sv;
 
-      kwin_virtual_lease_t(const kwin_virtual_lease_t &) = delete;
-      kwin_virtual_lease_t &operator=(const kwin_virtual_lease_t &) = delete;
-
-      /**
-       * @brief Keep the helper running after this lease is destroyed.
-       *
-       * Used when matching an already-configured `Virtual-*` output to the
-       * client's panel. The playbook-owned helper must outlive the session.
-       */
-      void detach() {
-        m_pid = -1;
-      }
-
-      ~kwin_virtual_lease_t() override {
-        if (m_pid <= 0) {
-          return;
-        }
-
-        BOOST_LOG(info) << "Second display: removing KWin virtual output "sv << m_name;
-        if (kill(m_pid, SIGTERM) != 0 && errno != ESRCH) {
-          BOOST_LOG(warning) << "Failed to stop virtual-output helper: "sv << strerror(errno);
-        }
-
-        const auto deadline = std::chrono::steady_clock::now() + 3s;
-        int status = 0;
-        while (std::chrono::steady_clock::now() < deadline) {
-          const auto waited = waitpid(m_pid, &status, WNOHANG);
-          if (waited == m_pid || (waited < 0 && errno == ECHILD)) {
-            m_pid = -1;
-            return;
-          }
-          std::this_thread::sleep_for(50ms);
-        }
-
-        kill(m_pid, SIGKILL);
-        waitpid(m_pid, &status, 0);
-        m_pid = -1;
-      }
-
-      [[nodiscard]] std::string output_name() const override {
-        return m_name;
-      }
-
-    private:
-      pid_t m_pid;  ///< Virtual-output helper child, or -1 after reaping.
-      std::string m_name;  ///< KWin/Sunshine capture output name.
-    };
+    std::mutex virtual_output_mu;  ///< Serializes helper spawn so two clients cannot race.
 
     /**
      * @brief Search PATH for an executable name.
@@ -1526,19 +1481,126 @@ namespace dual_display {
     }
 
     /**
+     * @brief Helper `--name` for a `Virtual-*` capture output, or the name itself.
+     */
+    [[nodiscard]] std::string helper_name_for_output(std::string_view output) {
+      constexpr auto prefix = "Virtual-"sv;
+      if (output.rfind(prefix, 0) == 0) {
+        return std::string {output.substr(prefix.size())};
+      }
+      return std::string {output};
+    }
+
+    /**
+     * @brief True when `/proc` cmdline is the named virtual-output helper.
+     *
+     * Scan `/proc` directly. Do not shell out to `pgrep -f` — a command
+     * line that contains `sunshine-ds-virtual-output` matches itself.
+     */
+    [[nodiscard]] bool cmdline_is_named_virtual_helper(const std::string &cmdline, std::string_view helper_name) {
+      std::vector<std::string_view> args;
+      for (std::size_t i = 0; i < cmdline.size();) {
+        const auto n = cmdline.find('\0', i);
+        const auto end = n == std::string::npos ? cmdline.size() : n;
+        if (end > i) {
+          args.emplace_back(cmdline.data() + i, end - i);
+        }
+        if (n == std::string::npos) {
+          break;
+        }
+        i = n + 1;
+      }
+      if (args.empty()) {
+        return false;
+      }
+
+      auto exe = args.front();
+      const auto slash = exe.rfind('/');
+      if (slash != std::string_view::npos) {
+        exe = exe.substr(slash + 1);
+      }
+      if (exe != "sunshine-ds-virtual-output" && exe != "krfb-virtualmonitor") {
+        return false;
+      }
+
+      for (std::size_t i = 1; i + 1 < args.size(); ++i) {
+        if (args[i] == "--name" && args[i + 1] == helper_name) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /**
+     * @brief Pids of live helpers holding `--name helper_name`.
+     */
+    [[nodiscard]] std::vector<pid_t> named_virtual_helper_pids(std::string_view helper_name) {
+      std::vector<pid_t> pids;
+      DIR *proc = opendir("/proc");
+      if (!proc) {
+        return pids;
+      }
+
+      const auto self = getpid();
+      while (dirent *ent = readdir(proc)) {
+        char *end = nullptr;
+        const long pid_l = std::strtol(ent->d_name, &end, 10);
+        if (!end || *end != '\0' || pid_l <= 0 || static_cast<pid_t>(pid_l) == self) {
+          continue;
+        }
+
+        const auto pid = static_cast<pid_t>(pid_l);
+        std::ifstream in {"/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary};
+        if (!in) {
+          continue;
+        }
+        const std::string cmdline {std::istreambuf_iterator<char> {in}, std::istreambuf_iterator<char> {}};
+        if (cmdline_is_named_virtual_helper(cmdline, helper_name)) {
+          pids.push_back(pid);
+        }
+      }
+      closedir(proc);
+      return pids;
+    }
+
+    /**
+     * @brief True when a helper already holds this virtual output name.
+     */
+    [[nodiscard]] bool virtual_helper_running(std::string_view helper_name) {
+      return !named_virtual_helper_pids(helper_name).empty();
+    }
+
+    /**
      * @brief True when `needle` is an attached capture output.
      *
      * Do **not** call `kscreen-doctor`. Duplicate Virtual-* outputs make
      * it hang, and the hang looks like a missing display so a second helper
-     * gets spawned. KWin `display_names` is enough.
+     * gets spawned. Prefer `/proc` helper detection: `platf::display_names`
+     * opens a throwaway KWin connection and returns a dummy `""` while
+     * still elevated, which used to spawn extras.
      */
     [[nodiscard]] bool output_is_attached(const std::string &needle) {
       if (needle.empty()) {
         return false;
       }
 
+      const auto helper_name = helper_name_for_output(needle);
+      if (virtual_helper_running(helper_name)) {
+        return true;
+      }
+
       const auto outputs = platf::display_names(platf::mem_type_e::system);
       return std::find(std::begin(outputs), std::end(outputs), needle) != std::end(outputs);
+    }
+
+    /**
+     * @brief True when the singleton virtual GamePad output is already available.
+     */
+    [[nodiscard]] bool virtual_output_present(const std::string &output) {
+      if (output.empty()) {
+        return false;
+      }
+      return output_is_attached(output) || output_is_attached(helper_name_for_output(output));
     }
 
     [[nodiscard]] bool virtual_display_available() {
@@ -1593,14 +1655,30 @@ namespace dual_display {
     }
 #endif
 
+    /**
+     * @brief Lease the singleton virtual GamePad output.
+     *
+     * HDMI stays the physical TV. Linux DS never creates a second
+     * `Virtual-*` and never SIGTERMs the helper when a stream ends.
+     */
     [[nodiscard]] std::unique_ptr<lease_t> acquire_virtual_display(const request_t &request) {
-      const auto name = std::string {"sunshine-ds"};
-      const auto capture_name = "Virtual-" + name;
-      if (output_is_attached(capture_name) || output_is_attached(name)) {
-        const auto resolved = output_is_attached(capture_name) ? capture_name : name;
-        BOOST_LOG(info) << "Second display: reusing already-attached "sv << resolved
-                        << " (not spawning another helper)"sv;
-        return std::make_unique<physical_lease_t>(resolved);
+      const std::string name {kwin_virtual_helper_name};
+      const std::string capture_name {kwin_virtual_capture_name};
+      std::lock_guard lock {virtual_output_mu};
+
+      auto existing_pids = named_virtual_helper_pids(name);
+      if (existing_pids.size() > 1) {
+        BOOST_LOG(warning) << "Second display: "sv << existing_pids.size()
+                           << " helpers already hold --name "sv << name
+                           << "; capturing "sv << capture_name
+                           << " without spawning another"sv;
+      }
+      if (!existing_pids.empty() || virtual_output_present(capture_name)) {
+        BOOST_LOG(info) << "Second display: reusing "sv << capture_name
+                        << " at "sv << request.width << 'x' << request.height
+                        << '@' << request.framerate
+                        << " (singleton helper; encoder will scale)"sv;
+        return std::make_unique<physical_lease_t>(capture_name);
       }
 
       auto binary = virtual_output_helper_path();
@@ -1631,7 +1709,7 @@ namespace dual_display {
 
       posix_spawn_file_actions_t actions;
       posix_spawn_file_actions_init(&actions);
-      int logfd = open("/tmp/sunshine-ds-virtual-output.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      int logfd = open("/tmp/sunshine-ds-virtual-output.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
       if (logfd >= 0) {
         posix_spawn_file_actions_adddup2(&actions, logfd, STDOUT_FILENO);
         posix_spawn_file_actions_adddup2(&actions, logfd, STDERR_FILENO);
@@ -1639,9 +1717,7 @@ namespace dual_display {
 
       posix_spawnattr_t spawn_attr;
       posix_spawnattr_init(&spawn_attr);
-#ifdef __linux__
       addclose_inet_sockets(&actions, logfd);
-#endif
 
       pid_t pid = -1;
       const int spawned = posix_spawn(&pid, binary.c_str(), &actions, &spawn_attr, argv.data(), environ);
@@ -1655,6 +1731,10 @@ namespace dual_display {
         return nullptr;
       }
 
+      BOOST_LOG(info) << "Second display: spawned singleton helper pid "sv << pid
+                      << " for "sv << capture_name << " at "sv << resolution
+                      << "; it stays up after clients disconnect"sv;
+
       auto retry_delay = 50ms;
       const auto deadline = std::chrono::steady_clock::now() + 8s;
       while (std::chrono::steady_clock::now() < deadline) {
@@ -1664,62 +1744,18 @@ namespace dual_display {
           BOOST_LOG(warning) << "Virtual-output helper exited before the output appeared"sv;
           return nullptr;
         }
-        if (output_is_attached(capture_name) || output_is_attached(name)) {
-          const auto resolved = output_is_attached(capture_name) ? capture_name : name;
-          BOOST_LOG(info) << "Second display: created KWin virtual output "sv << resolved << " at "sv
-                          << resolution << '@' << request.framerate
-                          << "; it will be removed when the second stream ends"sv;
-          return std::make_unique<kwin_virtual_lease_t>(pid, resolved);
+        if (virtual_output_present(capture_name)) {
+          return std::make_unique<physical_lease_t>(capture_name);
         }
         std::this_thread::sleep_for(retry_delay);
         retry_delay = std::min(retry_delay * 2, 400ms);
       }
 
-      BOOST_LOG(warning) << "Virtual-output helper started, but KWin never advertised "sv << capture_name;
-      kill(pid, SIGTERM);
-      waitpid(pid, nullptr, 0);
-      return nullptr;
-    }
-
-    [[nodiscard]] bool spawn_detached_kwin_virtual_helper(int width, int height) {
-      auto lease = acquire_virtual_display({width, height, 60, {}});
-      if (!lease) {
-        return false;
-      }
-      if (auto *kwin = dynamic_cast<kwin_virtual_lease_t *>(lease.get())) {
-        kwin->detach();
-      }
-      return true;
-    }
-
-    /**
-     * @brief Ensure the playbook-owned KWin virtual output exists.
-     *
-     * A second client must not spawn another helper with the same name:
-     * duplicate Virtual-* outputs make kscreen-doctor hang, and kwingrab
-     * binds the last match (often an empty display → black GamePad stream
-     * while touch still hits the real window). Keep the live output and
-     * let the encoder scale.
-     *
-     * @return True when the named output is attached afterwards.
-     */
-    [[nodiscard]] bool resize_named_kwin_virtual_output(const std::string &output, int width, int height) {
-      if (output_is_attached(output)) {
-        BOOST_LOG(info) << "Second display: keeping attached "sv << output
-                        << " (client asked "sv << width << 'x' << height
-                        << "; will scale, not spawn another helper)"sv;
-        return true;
-      }
-
-      BOOST_LOG(info) << "Second display: creating "sv << output << " at "sv
-                      << width << 'x' << height;
-      if (spawn_detached_kwin_virtual_helper(width, height) && output_is_attached(output)) {
-        return true;
-      }
-
-      BOOST_LOG(warning) << "Second display: failed to size "sv << output << " to "sv
-                         << width << 'x' << height;
-      return false;
+      // KWin 6.7 may never advertise the output while the helper still
+      // holds it. Do not SIGTERM — capture can still bind the name.
+      BOOST_LOG(warning) << "Virtual-output helper is running, but KWin has not advertised "sv
+                         << capture_name << " yet; capturing that name anyway"sv;
+      return std::make_unique<physical_lease_t>(capture_name);
     }
 
 #else
@@ -1764,6 +1800,20 @@ namespace dual_display {
       return virtual_display_available();
     }
 
+#ifdef __linux__
+    // Named Virtual-* is the playbook GamePad output. Do not require
+    // kwin_display_names: that returns a dummy "" while still elevated
+    // and would hide dual-stream from /serverinfo.
+    if (source.rfind("Virtual-", 0) == 0) {
+      if (source != kwin_virtual_capture_name) {
+        BOOST_LOG(warning) << "Second display: "sv << source
+                           << " is not supported; Linux DS serves only "sv
+                           << kwin_virtual_capture_name;
+      }
+      return virtual_display_available();
+    }
+#endif
+
     // A named monitor, which must actually be attached. The same output as
     // primary is allowed so both streams can capture HDMI while we bring the
     // virtual GamePad display back.
@@ -1783,28 +1833,20 @@ namespace dual_display {
       return acquire_virtual_display(request);
     }
 
+#ifdef __linux__
+    if (source.rfind("Virtual-", 0) == 0) {
+      if (source != kwin_virtual_capture_name) {
+        BOOST_LOG(warning) << "Second display: capturing "sv << kwin_virtual_capture_name
+                           << " instead of "sv << source;
+      }
+      return acquire_virtual_display(request);
+    }
+#endif
+
     const auto output = resolve_output(source);
     if (output.empty()) {
       return nullptr;
     }
-
-#ifdef __linux__
-    if (output.rfind("Virtual-", 0) == 0) {
-      if (output_is_attached(output)) {
-        BOOST_LOG(info) << "Second display: capturing existing "sv << output
-                        << " at "sv << request.width << 'x' << request.height << '@' << request.framerate
-                        << " (not spawning another helper; encoder will scale)"sv;
-        return std::make_unique<physical_lease_t>(output);
-      }
-      if (!resize_named_kwin_virtual_output(output, request.width, request.height)) {
-        BOOST_LOG(warning) << "Second display: "sv << output << " is not attached"sv;
-        return nullptr;
-      }
-      BOOST_LOG(info) << "Second display: capturing "sv << output << " at "sv
-                      << request.width << 'x' << request.height << '@' << request.framerate;
-      return std::make_unique<physical_lease_t>(output);
-    }
-#endif
 
     if (output == primary_output()) {
       BOOST_LOG(info) << "Second display: capturing primary output "sv << output

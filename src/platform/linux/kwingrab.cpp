@@ -14,6 +14,7 @@
 #include <chrono>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <pwd.h>
 #include <ranges>
 #include <string>
@@ -426,11 +427,25 @@ namespace kwin {
       }
       struct wl_output *output = nullptr;
       if (!output_name.empty()) {
+        int matches = 0;
         for (auto const &[output_, params_] : outputs) {
-          if (params_->name == output_name) {
+          if (params_->name != output_name) {
+            continue;
+          }
+          ++matches;
+          const bool candidate_has_size = params_->width > 0 && params_->height > 0;
+          const bool best_has_size = out_params && out_params->width > 0 && out_params->height > 0;
+          // Duplicate Virtual-* names: keep the first sized output, not the
+          // last (often empty) registry entry that produced a black stream.
+          if (!output || (!best_has_size && candidate_has_size)) {
             output = output_;
             out_params = params_;
           }
+        }
+        if (matches > 1) {
+          BOOST_LOG(warning) << "[kwingrab] "sv << matches
+                             << " outputs named "sv << output_name
+                             << "; capturing the first with a real size"sv;
         }
         if (!output || !out_params) {
           // Never capture HDMI (or whatever is first) when the GamePad
@@ -802,11 +817,30 @@ namespace platf {
       return display_names;
     }
 
+    // Dual-stream acquire used to call this in a tight loop. Each call opens a
+    // full Wayland screencast_t (no stream_output, but still a roundtrip) and
+    // raced the live capture. Cache briefly; dual_display prefers /proc anyway.
+    static std::mutex cache_mu;
+    static std::vector<std::string> cache;
+    static std::chrono::steady_clock::time_point cache_at {};
+    {
+      std::lock_guard lock {cache_mu};
+      const auto now = std::chrono::steady_clock::now();
+      if (!cache.empty() && now - cache_at < 750ms) {
+        return cache;
+      }
+    }
+
     const auto screencast = std::make_unique<kwin::screencast_t>();
     if (screencast->init() < 0) {
-      return {};
+      std::lock_guard lock {cache_mu};
+      return cache;
     }
-    return screencast->get_output_names();
+    auto names = screencast->get_output_names();
+    std::lock_guard lock {cache_mu};
+    cache = names;
+    cache_at = std::chrono::steady_clock::now();
+    return names;
   }
 
   /**

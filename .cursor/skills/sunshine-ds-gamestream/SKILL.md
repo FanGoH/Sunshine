@@ -33,9 +33,9 @@ If `lstart` is older than the binary mtime, the process does not have the latest
 
 This is the working GameStream baseline. Do not “improve” it unless the user asks.
 
-- Conf `~/.config/sunshine-ds-dev/sunshine/sunshine.conf`: `capture = kwin`, `encoder = software`, `hevc_mode = 1`, `av1_mode = 1`, `port = 48100`, `output_name = HDMI-A-1`. `dual_display_source = Virtual-sunshine-ds` when the helper is holding that output; otherwise HDMI twice.
-- Virtual GamePad panel: `/home/deck/.local/bin/sunshine-ds-virtual-output --name sunshine-ds --width 1920 --height 1080 --scale 1` must stay running. Live size is whatever `kscreen-doctor` reports for `Virtual-sunshine-ds` (often 1920×1080 at `1920,0`; older notes said 1080×1240). KWin 6.7 `stream_virtual_output` fails with `Could not find output`; the helper holds the stream anyway. Killing the helper removes the output. Checkpoint rollback: `dual_display_source = HDMI-A-1` and stop the helper.
-- Dual-stream checkpoint (Thor): HDMI-A-1 1920×1080 primary + Virtual-sunshine-ds **live size** (often 1920×1080) second stream. Log: `Second display: capturing Virtual-sunshine-ds` and `Screencasting output name Virtual-sunshine-ds`. Mouse can move between streams. Do not rebuild DS to “fix” dual-stream.
+- Conf `~/.config/sunshine-ds-dev/sunshine/sunshine.conf`: `capture = kwin`, `encoder = software`, `hevc_mode = 1`, `av1_mode = 1`, `port = 48100`, `output_name = HDMI-A-1`. `dual_display_source = Virtual-sunshine-ds`.
+- **One virtual display only.** HDMI-A-1 is the physical TV. Linux DS serves at most one `Virtual-sunshine-ds` for Azahar/Cemu. Playbook helper: `/home/deck/.local/bin/sunshine-ds-virtual-output --name sunshine-ds --width 1920 --height 1080 --scale 1`. It stays up across connect/disconnect. DS must not spawn a second `--name sunshine-ds` and must not SIGTERM it when a stream ends. Do not use `kscreen-doctor` to decide if it exists.
+- Dual-stream: HDMI primary + that one virtual second stream. Log: `Second display: reusing Virtual-sunshine-ds` and `Screencasting output name Virtual-sunshine-ds`. A second client must share the GamePad capture thread, not open another KWin screencast of the same output.
 - Thor Cemu dual-screen: playbook `scripts/ensure-cemu-dual-screen.sh` + `scripts/bind-gamepad.py cemu --match Thor`. Standalone `info.cemu.Cemu`, Wii U GamePad, mappings **only** on the named Sunshine Xbox pad. Do not hand-edit `controller0.xml`.
 - Start env: Distrobox `steamos-tools`, `CONFIGURATION_DIRECTORY=/home/deck/.config/sunshine-ds-dev`, `KWIN_WAYLAND_NO_PERMISSION_CHECKS=1`, `WAYLAND_DISPLAY=wayland-0`, `unset DISPLAY`.
 - After `/launch` the log must contain `Skipping encoder re-probe; using [software]` (not a vulkan/vaapi walk).
@@ -43,7 +43,7 @@ This is the working GameStream baseline. Do not “improve” it unless the user
 - Reconnect must keep the same pid. If log shows `drop_elevated_privileges` then `zkde_screencast_unstable_v1 not found`, that pid is dead for capture — restart DS.
 - Do **not** replace Decky Sunshine. Do **not** `POST /api/restart`. Do **not** `sudo systemctl --user`. Do **not** `kwin_wayland --replace`.
 
-Code that must stay in the running binary: skip software `ALWAYS_REPROBE` on `/launch`; flush KWin Close before PipeWire stop; async `pw_stream_destroy`; never `drop_elevated_privileges` after KWin was bound this process; null-safe `net::host_create` / `free_host`; `net::set_cloexec` on RTSP/video/audio fds; virtual-output child `addclose_inet_sockets` (keep AF_UNIX). `POSIX_SPAWN_CLOEXEC_DEFAULT` is **not** defined on this glibc without `_GNU_SOURCE`.
+Code that must stay in the running binary: skip software `ALWAYS_REPROBE` on `/launch`; flush KWin Close before PipeWire stop; async `pw_stream_destroy`; never `drop_elevated_privileges` after KWin was bound this process; null-safe `net::host_create` / `free_host`; `net::set_cloexec` on RTSP/video/audio fds; virtual-output child `addclose_inet_sockets` (keep AF_UNIX); singleton `Virtual-sunshine-ds` (detect helper via `/proc`, never SIGTERM on disconnect); shared `capture_thread_sync2`; kwingrab first sized match on duplicate names. `POSIX_SPAWN_CLOEXEC_DEFAULT` is **not** defined on this glibc without `_GNU_SOURCE`.
 
 ## Symptom → cause → fix
 
@@ -67,14 +67,14 @@ If it returns, the running pid is older than the skip-reprobe / async-teardown i
 
 | Check | Meaning |
 |---|---|
-| Spectacle screenshot all black | KWin FBO wedged. `qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.reinitialize`. Playbook: `scripts/ensure-kwin-screencast.sh`. |
+| Spectacle screenshot all black | KWin FBO wedged. **Last resort:** compositor `reinitialize` (can restart KWin and kill the helper). First: restart PipeWire on the user bus, then DS; respawn **one** helper if it died. |
 | Probe I-frame ~1200 bytes / 0% coded | `dummy_img()`, not live capture |
 | `cpu frame type=2` + high `pixel_diffs` | SHM/MemFd is capturing |
 | DMA-BUF DCC modifier + mmap EPERM | Do not offer DMA-BUF for software encode |
 
 ### Odin stacked GamePad is black, touch still works
 
-A second client joining a live Thor dual-stream must **not** spawn another `sunshine-ds-virtual-output --name sunshine-ds`. Duplicate `Virtual-sunshine-ds` outputs make `kscreen-doctor` hang and kwingrab binds the last (empty) output → black video, touch still works. Reuse the attached output and scale. Kill extra helper PIDs by number; keep the long-lived playbook helper.
+A second client joining a live Thor dual-stream must **not** spawn another `sunshine-ds-virtual-output --name sunshine-ds`. Duplicate `Virtual-sunshine-ds` outputs make `kscreen-doctor` hang and used to make kwingrab bind the last (empty) output → black video, touch still works. Reuse the attached output via `/proc`, share one GamePad screencast, and scale. Kill extra helper PIDs by number; keep the long-lived playbook helper.
 
 ### Ghost BUSY / wrong app
 
@@ -131,7 +131,8 @@ Playbook: `scripts/ensure-cemu-dual-screen.sh` and `scripts/bind-gamepad.py cemu
 - Hardcode Headscale URLs or print `.auth` / certs / passwords
 - Install Bazzite Eden reorder hooks
 - Hand-edit Cemu `controller0.xml` or copy mappings onto every `<controller>`
-- Kill `sunshine-ds-virtual-output` while dual-stream is the checkpoint
-- Spawn a second virtual-output helper named `sunshine-ds` while one is already attached
+- Kill `sunshine-ds-virtual-output` while dual-stream is the checkpoint, or when a client disconnects
+- Spawn a second virtual-output helper named `sunshine-ds` (Linux DS supports **one** virtual display; HDMI is the TV)
 - Call `kscreen-doctor` to decide whether `Virtual-sunshine-ds` exists (hangs with duplicates)
+- Compositor `reinitialize` as the first fix for “connecting never streaming”
 - `pgrep -f` / `pkill -f` sunshine, or `pgrep -f` a command that contains `sunshine-ds-virtual-output`
