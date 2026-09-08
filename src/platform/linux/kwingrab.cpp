@@ -40,6 +40,14 @@
 
 using namespace std::literals;
 
+namespace {
+  // Dropping all capabilities after a working screencast makes KWin hide
+  // zkde_screencast_unstable_v1 from this process. Later /launch then 503s
+  // until sunshine-ds is restarted. Only drop once, and never after success.
+  bool kwin_screencast_seen_this_process = false;
+  bool kwin_dropped_privileges_this_process = false;
+}  // namespace
+
 namespace kwin {
   /**
    * KWin Wayland ScreenCast permissions
@@ -556,6 +564,7 @@ namespace kwin {
         self->kde_screencast_v1_ = static_cast<struct zkde_screencast_unstable_v1 *>(
           wl_registry_bind(reg, name, &zkde_screencast_unstable_v1_interface, bind_ver)
         );
+        kwin_screencast_seen_this_process = true;
         BOOST_LOG(debug) << "[kwingrab] bound zkde_screencast_unstable_v1 version "sv << bind_ver;
       } else if (!std::strcmp(interface, wl_output_interface.name)) {
         // Bind version 4 - we need wl_output name for matching
@@ -708,9 +717,14 @@ namespace kwin {
 #if !defined(__FreeBSD__)
       // Check if KWin screencasting extension is accessible after first init attempt
       if (!screencast->is_kwin_screencasting_available()) {
+        if (kwin_screencast_seen_this_process || kwin_dropped_privileges_this_process) {
+          BOOST_LOG(error) << "[kwingrab] KWin screencasting unavailable. Not dropping privileges; that hides zkde_screencast_unstable_v1 on SteamOS and makes later /launch return 503. Restart sunshine-ds."sv;
+          return -1;
+        }
         // KWin screencasting extension was not found. Drop ALL elevated privileges in case KWin is missing CAP_SYS_NICE
         BOOST_LOG(warning) << "[kwingrab] KWin screencasting unavailable after init. Trying again after dropping ALL elevated privileges."sv;
         platf::drop_elevated_privileges(true);
+        kwin_dropped_privileges_this_process = true;
         // Retry screencast session init after privilege drop
         screencast.reset();  // Cleanup current screencast instance
         screencast = std::make_unique<screencast_t>();  // Create new screencast instance

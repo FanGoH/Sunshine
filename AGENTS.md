@@ -1,4 +1,7 @@
 On Windows we use msys2 and ucrt64 to compile.
+
+For SteamOS GameStream / KWin capture / Moonlight 503, read `.cursor/skills/sunshine-ds-gamestream/SKILL.md` before tracing from scratch.
+
 You need to prefix commands with `C:\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c`.
 
 Prefix build directories with `cmake-build-`.
