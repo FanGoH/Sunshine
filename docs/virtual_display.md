@@ -137,7 +137,10 @@ normalize desktop pixels, `XOpenDisplay(":0")` (kms unsets `$DISPLAY`, so
 matches, then `XSendEvent` mask `0` to the GamePad GL child. The following
 mouse-button packet still goes to host uinput at that warped cursor — wx/GTK
 often ignore synthetic `send_event`. Host uinput abs-move on display 1 is
-skipped (wrong coordinate space). Do not raise GamePad over TV.
+skipped (wrong coordinate space). Odin **GamePad only** is display 0 with
+`x-ml-video[0].source=secondary` (`primary_from_secondary`); HDMI/TV taps stay
+display 0 without that flag. Checkpoint
+`checkpoint-2026-09-09-gamemode-cemu-touch-v2`. Do not raise GamePad over TV.
 
 ## Behavior without a supported source
 
