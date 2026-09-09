@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -124,6 +125,20 @@ namespace platf::gamescope {
    * @return True when the high bit is set.
    */
   [[nodiscard]] bool touch_is_second_display(std::uint32_t pointer_id);
+
+  /**
+   * @brief True when Game Mode should warp this absolute mouse onto GamePad View.
+   *
+   * Dual-stream / stacked Moonlight tags GamePad fingers as display 1. Odin
+   * **GamePad only** is a single stream (`x-ml-video[0].source=secondary`) so
+   * those taps are display 0. HDMI/TV taps stay display 0 without
+   * `primary_from_secondary` and must not take this path.
+   *
+   * @param display_index Zero-based Moonlight display index.
+   * @param primary_from_secondary True when video/0 captures the GamePad display.
+   * @return True when inject should own this packet.
+   */
+  [[nodiscard]] bool abs_targets_gamepad_view(std::size_t display_index, bool primary_from_secondary);
 
 }  // namespace platf::gamescope
 

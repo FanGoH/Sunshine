@@ -301,6 +301,7 @@ namespace input {
         feedback_queue {std::move(feedback_queue)},
         mouse_left_button_timeout {},
         last_abs_display {},
+        primary_from_secondary {},
         touch_state_mutex {},
         touch_ports {},
         active_touch_ids {},
@@ -326,6 +327,7 @@ namespace input {
 
     thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;  ///< Mouse left button timeout.
     std::size_t last_abs_display;  ///< Last absolute-mouse display index (mouse buttons have none).
+    bool primary_from_secondary;  ///< True when video/0 captures the GamePad display (Odin GamePad only).
 
     std::mutex touch_state_mutex;  ///< Serializes touch-port teardown against incoming contacts.
     std::array<input::touch_port_t, CLIENT_DISPLAY_COUNT> touch_ports;  ///< Per-display coordinate bounds for absolute input.
@@ -922,7 +924,8 @@ namespace input {
 
     input->last_abs_display = client_display_index(encoded_index).value_or(0);
 #ifdef __linux__
-    if (input->last_abs_display == 1 && config::video.dual_display_source == "gamescope-virtual"sv) {
+    if (config::video.dual_display_source == "gamescope-virtual"sv &&
+        platf::gamescope::abs_targets_gamepad_view(input->last_abs_display, input->primary_from_secondary)) {
       static_cast<void>(platf::inject_gamepad_view_abs_mouse(abs_port, tpcoords->first, tpcoords->second));
       return;
     }
@@ -944,7 +947,8 @@ namespace input {
    */
   void emit_mouse_button(const std::shared_ptr<input_t> &input, int button, bool release) {
 #ifdef __linux__
-    if (input->last_abs_display == 1 && config::video.dual_display_source == "gamescope-virtual"sv) {
+    if (config::video.dual_display_source == "gamescope-virtual"sv &&
+        platf::gamescope::abs_targets_gamepad_view(input->last_abs_display, input->primary_from_secondary)) {
       // Warp + XSendEvent first. wx/GTK often ignores send_event, so still emit
       // a real uinput click at the warped cursor (stacked TV/GamePad share it).
       static_cast<void>(platf::inject_gamepad_view_button(button, release));
@@ -2494,7 +2498,7 @@ namespace input {
   /**
    * @brief Allocate and initialize platform input state for a stream.
    */
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id, std::string client_name, std::string unique_id) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id, std::string client_name, std::string unique_id, bool primary_from_secondary) {
     std::shared_ptr<input_t> input;
     bool resumed = false;
     {
@@ -2505,6 +2509,7 @@ namespace input {
         input = iter->second;
         input->client_name = std::move(client_name);
         input->unique_id = std::move(unique_id);
+        input->primary_from_secondary = primary_from_secondary;
         resumed = true;
       } else {
         input = std::make_shared<input_t>(
@@ -2514,6 +2519,7 @@ namespace input {
         );
         input->client_name = std::move(client_name);
         input->unique_id = std::move(unique_id);
+        input->primary_from_secondary = primary_from_secondary;
         state.inputs.try_emplace(std::move(session_id), input);
       }
     }

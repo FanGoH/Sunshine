@@ -89,6 +89,13 @@ namespace platf::gamescope {
     return (pointer_id & TOUCH_SECOND_DISPLAY_POINTER) != 0;
   }
 
+  bool abs_targets_gamepad_view(std::size_t display_index, bool primary_from_secondary) {
+    if (display_index == 1) {
+      return true;
+    }
+    return display_index == 0 && primary_from_secondary;
+  }
+
 }  // namespace platf::gamescope
 
 #ifdef SUNSHINE_BUILD_X11

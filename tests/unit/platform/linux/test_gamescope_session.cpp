@@ -78,4 +78,11 @@ TEST(GamescopeSessionTest, DetectsSecondDisplayPointerBit) {
   EXPECT_TRUE(platf::gamescope::touch_is_second_display(platf::gamescope::TOUCH_SECOND_DISPLAY_POINTER));
 }
 
+TEST(GamescopeSessionTest, AbsTargetsGamepadViewForDualStreamAndGamepadOnly) {
+  EXPECT_TRUE(platf::gamescope::abs_targets_gamepad_view(1, false));
+  EXPECT_TRUE(platf::gamescope::abs_targets_gamepad_view(1, true));
+  EXPECT_TRUE(platf::gamescope::abs_targets_gamepad_view(0, true));
+  EXPECT_FALSE(platf::gamescope::abs_targets_gamepad_view(0, false));
+}
+
 #endif
