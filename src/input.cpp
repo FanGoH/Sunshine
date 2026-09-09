@@ -36,6 +36,9 @@ extern "C" {
 #include "logging.h"
 #include "platform/common.h"
 #include "platform/virtualhid_input.h"
+#ifdef __linux__
+  #include "src/platform/linux/gamescope_session.h"
+#endif
 #include "thread_pool.h"
 #include "utility.h"
 
@@ -297,6 +300,7 @@ namespace input {
         touch_port_events {{std::move(touch_port_event), std::move(touch_port_event2)}},
         feedback_queue {std::move(feedback_queue)},
         mouse_left_button_timeout {},
+        last_abs_display {},
         touch_state_mutex {},
         touch_ports {},
         active_touch_ids {},
@@ -321,6 +325,7 @@ namespace input {
     std::mutex input_queue_lock;  ///< Input queue lock.
 
     thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;  ///< Mouse left button timeout.
+    std::size_t last_abs_display;  ///< Last absolute-mouse display index (mouse buttons have none).
 
     std::mutex touch_state_mutex;  ///< Serializes touch-port teardown against incoming contacts.
     std::array<input::touch_port_t, CLIENT_DISPLAY_COUNT> touch_ports;  ///< Per-display coordinate bounds for absolute input.
@@ -747,6 +752,7 @@ namespace input {
     }
 
     input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
+    input->last_abs_display = 0;
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
 
@@ -914,7 +920,36 @@ namespace input {
       touch_port_dim_y
     };
 
+    input->last_abs_display = client_display_index(encoded_index).value_or(0);
+#ifdef __linux__
+    if (input->last_abs_display == 1 && config::video.dual_display_source == "gamescope-virtual"sv) {
+      static_cast<void>(platf::inject_gamepad_view_abs_mouse(abs_port, tpcoords->first, tpcoords->second));
+      return;
+    }
+#endif
+
     platf::abs_mouse(platf_input, abs_port, tpcoords->first, tpcoords->second);
+  }
+
+  /**
+   * @brief Emit a mouse button, diverting display-1 clicks to GamePad View.
+   *
+   * Mouse-button packets have no display index. Game Mode GamePad taps are
+   * absolute mouse on display 1, then a bare left-click. Without this, the
+   * click lands on the raised Cemu TV at the last gamescope cursor (center).
+   *
+   * @param input Stream input that tracks the last absolute-mouse display.
+   * @param button Moonlight mouse button.
+   * @param release True for button-up.
+   */
+  void emit_mouse_button(const std::shared_ptr<input_t> &input, int button, bool release) {
+#ifdef __linux__
+    if (input->last_abs_display == 1 && config::video.dual_display_source == "gamescope-virtual"sv) {
+      static_cast<void>(platf::inject_gamepad_view_button(button, release));
+      return;
+    }
+#endif
+    platf::button_mouse(platf_input, button, release);
   }
 
   /**
@@ -959,7 +994,7 @@ namespace input {
           // Already released left button
           return;
         }
-        platf::button_mouse(platf_input, BUTTON_LEFT, release);
+        emit_mouse_button(input, BUTTON_LEFT, release);
 
         mouse_press[BUTTON_LEFT] = false;
         input->mouse_left_button_timeout = nullptr;
@@ -973,15 +1008,15 @@ namespace input {
       button == BUTTON_RIGHT && !release &&
       input->mouse_left_button_timeout > DISABLE_LEFT_BUTTON_DELAY
     ) {
-      platf::button_mouse(platf_input, BUTTON_RIGHT, false);
-      platf::button_mouse(platf_input, BUTTON_RIGHT, true);
+      emit_mouse_button(input, BUTTON_RIGHT, false);
+      emit_mouse_button(input, BUTTON_RIGHT, true);
 
       mouse_press[BUTTON_RIGHT] = false;
 
       return;
     }
 
-    platf::button_mouse(platf_input, button, release);
+    emit_mouse_button(input, button, release);
   }
 
   /**
@@ -2297,6 +2332,9 @@ namespace input {
   void reset_mouse_buttons() {
     for (int button = 0; button < mouse_press.size(); ++button) {
       if (mouse_press[button]) {
+#ifdef __linux__
+        static_cast<void>(platf::inject_gamepad_view_button(button, true));
+#endif
         platf::button_mouse(platf_input, button, true);
         mouse_press[button] = false;
       }
@@ -2351,6 +2389,7 @@ namespace input {
     reset_mouse_buttons();
     reset_keyboard_keys();
     reset_gamepads(input);
+    input->last_abs_display = 0;
   }
 
   /**

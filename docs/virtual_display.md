@@ -128,8 +128,14 @@ video/1 stays black.
 Hold-Select (`back_button_timeout`) pulses HOME on the libvirtualhid x360.
 That pad is UHID bluetooth, so Steam Game Mode ignores Guide. Sunshine then
 toggles `STEAM_OVERLAY` on Steam Big Picture plus `GAMESCOPE_FOCUSED_APP=769`.
-Display-index-1 touch is XSent to Cemu **GamePad View** on session gamescope
-(`:0`). Host uinput would hit the raised TV at the same `0,0`. Do not raise
+Display-index-1 finger taps from Fangoh Moonlight are **absolute mouse**
+(`sendMousePositionOnDisplay(..., displayIndex=1)` plus a later button packet
+with no display index). Native `LiSendTouchEvent` is compiled out. Sunshine
+maps those packets onto Cemu **GamePad View** on session gamescope (`:0`):
+normalize desktop pixels, `XWarpPointer` so `XQueryPointer` matches, then
+`XSendEvent` mask `0` to the GamePad GL child (not the wx frame). Host uinput
+would hit the raised TV at the same `0,0`, and a bare click would land at the
+gamescope cursor (often screen center — Wind Waker's item pad). Do not raise
 GamePad over TV (HDMI would show the pad).
 
 ## Behavior without a supported source

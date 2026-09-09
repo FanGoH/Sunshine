@@ -62,6 +62,24 @@ namespace platf::gamescope {
   [[nodiscard]] std::pair<int, int> touch_to_window_xy(float x, float y, int width, int height);
 
   /**
+   * @brief Convert absolute mouse pixels into a unit square.
+   *
+   * Moonlight GamePad taps are `LiSendMousePositionEventOnDisplay` (native
+   * LI_TOUCH is compiled out). Those packets are desktop pixels, not `[0, 1]`.
+   * Passing them through `touch_to_window_xy` clamps every value `> 1` to the
+   * far edge. Subtract the touch-port origin first.
+   *
+   * @param x Desktop-space X from `client_to_touchport`.
+   * @param y Desktop-space Y from `client_to_touchport`.
+   * @param offset_x Touch-port origin X.
+   * @param offset_y Touch-port origin Y.
+   * @param width Touch-port width in pixels.
+   * @param height Touch-port height in pixels.
+   * @return Coordinates in the same space as `touch_to_window_xy` (may be outside `[0, 1]`).
+   */
+  [[nodiscard]] std::pair<float, float> abs_to_unit(float x, float y, int offset_x, int offset_y, int width, int height);
+
+  /**
    * @brief Choose show vs hide from the current overlay atom.
    *
    * @param overlay_is_on True when `STEAM_OVERLAY=1` on Steam Big Picture.
@@ -122,5 +140,29 @@ namespace platf {
    * @return True when the event was delivered to GamePad View.
    */
   bool inject_gamepad_view_touch(const touch_port_t &touch_port, const touch_input_t &touch);
+
+  /**
+   * @brief Move the GamePad View pointer from a display-1 absolute mouse packet.
+   *
+   * Fangoh Moonlight maps finger taps with `sendMousePositionOnDisplay(..., 1)`
+   * plus a later mouse-button packet that has no display index. Host uinput
+   * then clicks the raised TV at the last gamescope cursor (often center),
+   * which is why Wind Waker's item pad jumps to the middle of the GamePad.
+   *
+   * @param touch_port Display-1 touch port (`offset` + env size in pixels).
+   * @param x Desktop-space X from `client_to_touchport`.
+   * @param y Desktop-space Y from `client_to_touchport`.
+   * @return True when GamePad View received the motion.
+   */
+  bool inject_gamepad_view_abs_mouse(const touch_port_t &touch_port, float x, float y);
+
+  /**
+   * @brief Click GamePad View after a display-1 absolute mouse move.
+   *
+   * @param button Moonlight mouse button (`BUTTON_LEFT` is `1`, same as X11).
+   * @param release True for button-up.
+   * @return True when GamePad View received the button event.
+   */
+  bool inject_gamepad_view_button(int button, bool release);
 
 }  // namespace platf

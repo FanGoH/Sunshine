@@ -53,6 +53,12 @@ namespace platf::gamescope {
     return {px, py};
   }
 
+  std::pair<float, float> abs_to_unit(float x, float y, int offset_x, int offset_y, int width, int height) {
+    const auto nx = width > 0 ? (x - static_cast<float>(offset_x)) / static_cast<float>(width) : 0.0F;
+    const auto ny = height > 0 ? (y - static_cast<float>(offset_y)) / static_cast<float>(height) : 0.0F;
+    return {nx, ny};
+  }
+
   overlay_action_e overlay_toggle_action(bool overlay_is_on) {
     return overlay_is_on ? overlay_action_e::hide : overlay_action_e::show;
   }
@@ -88,6 +94,9 @@ namespace {
   Display *cached_display = nullptr;  ///< Reused X11 connection for `:0` gamescope.
   Window cached_pad = None;  ///< Last Cemu GamePad View xid.
   bool pad_pointer_down = false;  ///< True while display-1 contact is held on GamePad View.
+  int last_pad_x = 0;  ///< Last GamePad-local pointer X (for mouse-button packets).
+  int last_pad_y = 0;  ///< Last GamePad-local pointer Y (for mouse-button packets).
+  bool last_pad_xy_valid = false;  ///< True after at least one display-1 motion.
   std::uint32_t remembered_appid = 0;  ///< Last non-Steam shortcut id for overlay hide.
   XErrorHandler previous_x11_error = nullptr;  ///< Previous Xlib error handler.
 
@@ -362,11 +371,84 @@ namespace {
   }
 
   /**
+   * @brief Prefer the mapped GL child of GamePad View over the wx frame.
+   *
+   * Cemu paints on a full-size child (`1920x1080+0+0`). `XSendEvent` with
+   * `propagate=True` walks *ancestors*, not children, so a frame that has not
+   * selected `ButtonPressMask` never delivers the click to the canvas.
+   *
+   * @param dpy X11 display.
+   * @param pad GamePad View frame.
+   * @return Input target window.
+   */
+  Window gamepad_input_window(Display *dpy, Window pad) {
+    XWindowAttributes pad_attr {};
+    if (!XGetWindowAttributes(dpy, pad, &pad_attr) || pad_attr.width <= 0 || pad_attr.height <= 0) {
+      return pad;
+    }
+
+    Window root_return = 0;
+    Window parent_return = 0;
+    Window *children = nullptr;
+    unsigned int nchildren = 0;
+    if (!XQueryTree(dpy, pad, &root_return, &parent_return, &children, &nchildren) || !children) {
+      return pad;
+    }
+
+    Window best = pad;
+    int best_area = 0;
+    const int min_w = pad_attr.width * 9 / 10;
+    const int min_h = pad_attr.height * 9 / 10;
+    for (unsigned int i = 0; i < nchildren; ++i) {
+      XWindowAttributes attr {};
+      if (!XGetWindowAttributes(dpy, children[i], &attr) || attr.map_state != IsViewable) {
+        continue;
+      }
+      if (attr.width < min_w || attr.height < min_h) {
+        continue;
+      }
+      const int area = attr.width * attr.height;
+      if (area > best_area) {
+        best = children[i];
+        best_area = area;
+      }
+    }
+    XFree(children);
+    return best;
+  }
+
+  /**
+   * @brief Log the first few GamePad pointer events with mapped pixels.
+   *
+   * @param kind Short label (`touch`, `abs`, `button`).
+   * @param nx Unit X before clamp.
+   * @param ny Unit Y before clamp.
+   * @param x Window-local X.
+   * @param y Window-local Y.
+   * @param window Target xid.
+   * @param width Target width.
+   * @param height Target height.
+   */
+  void log_gamepad_pointer(std::string_view kind, float nx, float ny, int x, int y, Window window, int width, int height) {
+    static int remaining = 12;
+    if (remaining <= 0) {
+      return;
+    }
+    --remaining;
+    BOOST_LOG(info) << "GamePad "sv << kind << " unit="sv << nx << ',' << ny
+                    << " px="sv << x << ',' << y
+                    << " xid="sv << window << ' ' << width << 'x' << height;
+  }
+
+  /**
    * @brief Send a pointer event to a window without raising or focusing it.
    *
    * Host uinput is hit-tested by gamescope onto the top surface (Cemu TV).
-   * XSendEvent goes to the X11 client directly, so GamePad View still receives
-   * the click while it stays stacked under the TV.
+   * `XSendEvent` with mask `0` is delivered to the client that created the
+   * destination, so GamePad View still receives the click while stacked
+   * under the TV. `XWarpPointer` keeps `XQueryPointer` in sync — wx/GTK
+   * often ignore `send_event=True` and read the real cursor, which sits at
+   * screen center unless we warp.
    *
    * @param dpy X11 display.
    * @param window Target window.
@@ -378,32 +460,94 @@ namespace {
    */
   void send_pointer(Display *dpy, Window window, int type, int x, int y, unsigned int state, unsigned int button) {
     const auto [rx, ry] = root_xy(dpy, window, x, y);
-    XEvent event {};
-    event.xbutton.type = type;
-    event.xbutton.serial = 0;
-    event.xbutton.send_event = True;
-    event.xbutton.display = dpy;
-    event.xbutton.window = window;
-    event.xbutton.root = DefaultRootWindow(dpy);
-    event.xbutton.subwindow = None;
-    event.xbutton.time = CurrentTime;
-    event.xbutton.x = x;
-    event.xbutton.y = y;
-    event.xbutton.x_root = rx;
-    event.xbutton.y_root = ry;
-    event.xbutton.state = state;
-    event.xbutton.button = button;
-    event.xbutton.same_screen = True;
+    XWarpPointer(dpy, None, DefaultRootWindow(dpy), 0, 0, 0, 0, rx, ry);
 
-    long mask = PointerMotionMask;
-    if (type == ButtonPress) {
-      mask = ButtonPressMask;
-    } else if (type == ButtonRelease) {
-      mask = ButtonReleaseMask;
-    } else if (state & Button1Mask) {
-      mask = ButtonMotionMask;
+    XEvent event {};
+    if (type == MotionNotify) {
+      event.xmotion.type = MotionNotify;
+      event.xmotion.serial = 0;
+      event.xmotion.send_event = True;
+      event.xmotion.display = dpy;
+      event.xmotion.window = window;
+      event.xmotion.root = DefaultRootWindow(dpy);
+      event.xmotion.subwindow = None;
+      event.xmotion.time = CurrentTime;
+      event.xmotion.x = x;
+      event.xmotion.y = y;
+      event.xmotion.x_root = rx;
+      event.xmotion.y_root = ry;
+      event.xmotion.state = state;
+      event.xmotion.is_hint = NotifyNormal;
+      event.xmotion.same_screen = True;
+    } else {
+      event.xbutton.type = type;
+      event.xbutton.serial = 0;
+      event.xbutton.send_event = True;
+      event.xbutton.display = dpy;
+      event.xbutton.window = window;
+      event.xbutton.root = DefaultRootWindow(dpy);
+      event.xbutton.subwindow = None;
+      event.xbutton.time = CurrentTime;
+      event.xbutton.x = x;
+      event.xbutton.y = y;
+      event.xbutton.x_root = rx;
+      event.xbutton.y_root = ry;
+      event.xbutton.state = state;
+      event.xbutton.button = button;
+      event.xbutton.same_screen = True;
     }
-    XSendEvent(dpy, window, True, mask, &event);
+
+    // Mask 0 + propagate False: deliver to the creating client of `window`.
+    // A non-zero mask only reaches clients that selected it; the wx frame
+    // often has not, and propagate walks parents rather than the GL child.
+    XSendEvent(dpy, window, False, 0, &event);
+  }
+
+  /**
+   * @brief Resolve GamePad View, map unit coords, and send a pointer event.
+   *
+   * @param dpy X11 display.
+   * @param nx Unit X in `[0, 1]`.
+   * @param ny Unit Y in `[0, 1]`.
+   * @param kind Log label.
+   * @param type `ButtonPress`, `ButtonRelease`, or `MotionNotify`.
+   * @param state Modifier / button mask.
+   * @param button Button number, or `0` for motion.
+   * @return True when GamePad View exists and the event was flushed.
+   */
+  bool inject_unit(Display *dpy, float nx, float ny, std::string_view kind, int type, unsigned int state, unsigned int button) {
+    const auto pad = gamepad_view_window(dpy);
+    if (pad == None) {
+      return false;
+    }
+    const auto target = gamepad_input_window(dpy, pad);
+
+    XWindowAttributes attr {};
+    if (!XGetWindowAttributes(dpy, target, &attr) || attr.width <= 0 || attr.height <= 0) {
+      return false;
+    }
+
+    const auto [x, y] = platf::gamescope::touch_to_window_xy(nx, ny, attr.width, attr.height);
+    last_pad_x = x;
+    last_pad_y = y;
+    last_pad_xy_valid = true;
+    log_gamepad_pointer(kind, nx, ny, x, y, target, attr.width, attr.height);
+    send_pointer(dpy, target, type, x, y, state, button);
+    XFlush(dpy);
+    return true;
+  }
+
+  /**
+   * @brief Moonlight mouse button to X11 button number.
+   *
+   * @param button Moonlight `BUTTON_*` (`1` left, `2` middle, `3` right).
+   * @return X11 button, or `0` when unsupported.
+   */
+  unsigned int x11_button(int button) {
+    if (button >= 1 && button <= 5) {
+      return static_cast<unsigned int>(button);
+    }
+    return 0;
   }
 
 }  // namespace
@@ -448,58 +592,97 @@ namespace platf {
       return false;
     }
 
-    const auto pad = gamepad_view_window(dpy);
-    if (pad == None) {
-      return false;
-    }
-
-    XWindowAttributes attr {};
-    if (!XGetWindowAttributes(dpy, pad, &attr) || attr.width <= 0 || attr.height <= 0) {
-      return false;
-    }
-
-    const auto [x, y] = platf::gamescope::touch_to_window_xy(touch.x, touch.y, attr.width, attr.height);
-
-    static bool logged_inject = false;
-    if (!logged_inject) {
-      BOOST_LOG(info) << "display-1 touch → GamePad View xid="sv << pad << ' ' << attr.width << 'x' << attr.height;
-      logged_inject = true;
-    }
-
     switch (touch.eventType) {
       case LI_TOUCH_EVENT_CANCEL_ALL:
         if (pad_pointer_down) {
-          send_pointer(dpy, pad, ButtonRelease, x, y, Button1Mask, Button1);
+          const auto ok = inject_unit(dpy, touch.x, touch.y, "touch-cancel"sv, ButtonRelease, Button1Mask, Button1);
           pad_pointer_down = false;
-          XFlush(dpy);
+          return ok;
         }
         return true;
       case LI_TOUCH_EVENT_UP:
       case LI_TOUCH_EVENT_CANCEL:
       case LI_TOUCH_EVENT_HOVER_LEAVE:
-        send_pointer(dpy, pad, ButtonRelease, x, y, Button1Mask, Button1);
         pad_pointer_down = false;
-        XFlush(dpy);
-        return true;
+        return inject_unit(dpy, touch.x, touch.y, "touch-up"sv, ButtonRelease, Button1Mask, Button1);
       case LI_TOUCH_EVENT_DOWN:
-        send_pointer(dpy, pad, MotionNotify, x, y, 0, 0);
-        send_pointer(dpy, pad, ButtonPress, x, y, 0, Button1);
+        if (!inject_unit(dpy, touch.x, touch.y, "touch-move"sv, MotionNotify, 0, 0)) {
+          return false;
+        }
         pad_pointer_down = true;
-        XFlush(dpy);
-        return true;
+        return inject_unit(dpy, touch.x, touch.y, "touch-down"sv, ButtonPress, 0, Button1);
       case LI_TOUCH_EVENT_MOVE:
-        send_pointer(dpy, pad, MotionNotify, x, y, pad_pointer_down ? Button1Mask : 0, 0);
-        XFlush(dpy);
-        return true;
+        return inject_unit(dpy, touch.x, touch.y, "touch-drag"sv, MotionNotify, pad_pointer_down ? Button1Mask : 0, 0);
       case LI_TOUCH_EVENT_HOVER:
-        send_pointer(dpy, pad, MotionNotify, x, y, 0, 0);
-        XFlush(dpy);
-        return true;
+        return inject_unit(dpy, touch.x, touch.y, "touch-hover"sv, MotionNotify, 0, 0);
       default:
         return false;
     }
 #else
     (void) touch;
+    return false;
+#endif
+  }
+
+  bool inject_gamepad_view_abs_mouse(const touch_port_t &touch_port, float x, float y) {
+#ifdef SUNSHINE_BUILD_X11
+    std::scoped_lock lock {x11_lock};
+    auto *dpy = x11_display();
+    if (!dpy) {
+      return false;
+    }
+    const auto [nx, ny] = platf::gamescope::abs_to_unit(
+      x,
+      y,
+      touch_port.offset_x,
+      touch_port.offset_y,
+      touch_port.width,
+      touch_port.height
+    );
+    return inject_unit(dpy, nx, ny, "abs"sv, MotionNotify, pad_pointer_down ? Button1Mask : 0, 0);
+#else
+    (void) touch_port;
+    (void) x;
+    (void) y;
+    return false;
+#endif
+  }
+
+  bool inject_gamepad_view_button(int button, bool release) {
+#ifdef SUNSHINE_BUILD_X11
+    const auto x_button = x11_button(button);
+    if (x_button == 0) {
+      return false;
+    }
+
+    std::scoped_lock lock {x11_lock};
+    auto *dpy = x11_display();
+    if (!dpy || !last_pad_xy_valid) {
+      return false;
+    }
+
+    const auto pad = gamepad_view_window(dpy);
+    if (pad == None) {
+      return false;
+    }
+    const auto target = gamepad_input_window(dpy, pad);
+    XWindowAttributes attr {};
+    if (!XGetWindowAttributes(dpy, target, &attr) || attr.width <= 0 || attr.height <= 0) {
+      return false;
+    }
+
+    const auto nx = attr.width > 1 ? static_cast<float>(last_pad_x) / static_cast<float>(attr.width - 1) : 0.0F;
+    const auto ny = attr.height > 1 ? static_cast<float>(last_pad_y) / static_cast<float>(attr.height - 1) : 0.0F;
+    log_gamepad_pointer(release ? "button-up"sv : "button-down"sv, nx, ny, last_pad_x, last_pad_y, target, attr.width, attr.height);
+    const auto type = release ? ButtonRelease : ButtonPress;
+    const unsigned int state = release ? Button1Mask : 0;
+    send_pointer(dpy, target, type, last_pad_x, last_pad_y, state, x_button);
+    pad_pointer_down = !release && x_button == Button1;
+    XFlush(dpy);
+    return true;
+#else
+    (void) button;
+    (void) release;
     return false;
 #endif
   }

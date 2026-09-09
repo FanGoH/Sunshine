@@ -38,6 +38,23 @@ TEST(GamescopeSessionTest, MapsNormalizedTouchOntoWindowPixels) {
   EXPECT_EQ(platf::gamescope::touch_to_window_xy(0.5F, 0.5F, 0, 0), std::make_pair(0, 0));
 }
 
+TEST(GamescopeSessionTest, MapsAbsoluteMousePixelsOntoUnitSquare) {
+  EXPECT_EQ(platf::gamescope::abs_to_unit(0.0F, 0.0F, 0, 0, 1920, 1080), std::make_pair(0.0F, 0.0F));
+  EXPECT_EQ(platf::gamescope::abs_to_unit(960.0F, 540.0F, 0, 0, 1920, 1080), std::make_pair(0.5F, 0.5F));
+  EXPECT_EQ(platf::gamescope::abs_to_unit(1920.0F, 1080.0F, 0, 0, 1920, 1080), std::make_pair(1.0F, 1.0F));
+  EXPECT_EQ(platf::gamescope::abs_to_unit(2880.0F, 540.0F, 1920, 0, 1920, 1080), std::make_pair(0.5F, 0.5F));
+  EXPECT_EQ(platf::gamescope::abs_to_unit(100.0F, 100.0F, 0, 0, 0, 0), std::make_pair(0.0F, 0.0F));
+}
+
+TEST(GamescopeSessionTest, AbsoluteMousePixelsAreNotClampedAsUnitCoords) {
+  // Passing desktop pixels through touch_to_window_xy would clamp 400 to 1.0.
+  const auto unit = platf::gamescope::abs_to_unit(384.0F, 216.0F, 0, 0, 1920, 1080);
+  EXPECT_NEAR(unit.first, 0.2F, 0.0001F);
+  EXPECT_NEAR(unit.second, 0.2F, 0.0001F);
+  EXPECT_EQ(platf::gamescope::touch_to_window_xy(unit.first, unit.second, 1920, 1080), std::make_pair(384, 216));
+  EXPECT_EQ(platf::gamescope::touch_to_window_xy(384.0F, 216.0F, 1920, 1080), std::make_pair(1919, 1079));
+}
+
 TEST(GamescopeSessionTest, TogglesOverlayAction) {
   EXPECT_EQ(platf::gamescope::overlay_toggle_action(false), platf::gamescope::overlay_action_e::show);
   EXPECT_EQ(platf::gamescope::overlay_toggle_action(true), platf::gamescope::overlay_action_e::hide);
