@@ -173,9 +173,9 @@ namespace platf {
    *
    * libvirtualhid x360 is UHID bluetooth (`045e:028e` bus `0005`). Steam Game
    * Mode does not honor Guide on that path. `back_button_timeout` already
-   * pulses HOME; this writes `STEAM_OVERLAY` on Steam Big Picture (or the
-   * largest `STEAM_GAME=769` window when that title is missing) plus
-   * `GAMESCOPE_FOCUSED_APP=769`. No-op when no Steam client surface exists.
+   * pulses HOME; this writes `STEAM_OVERLAY` on a **mapped** Steam Big Picture
+   * window plus `GAMESCOPE_FOCUSED_APP=769`. If Big Picture is unmapped (common
+   * for standalone Flatpak shortcuts), it sends `steam://overlay/toggle` instead.
    */
   void gamescope_on_guide_press();
 

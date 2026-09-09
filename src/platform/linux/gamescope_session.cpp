@@ -7,10 +7,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -304,8 +306,10 @@ namespace {
    *
    * Prefers a `Steam Big Picture Mode` title. Game Mode sometimes leaves only
    * a `steamwebhelper` with `STEAM_GAME=769` (no BPM caption) — overlay toggle
-   * is a silent no-op without that fallback. Prefer an already-on overlay atom,
-   * then a BPM-sized surface, then the largest 769 window.
+   * is a silent no-op without that fallback. Prefer an already-on overlay atom
+   * on a **mapped** surface, then a BPM-sized mapped surface. Unmapped 200×200
+   * steamwebhelper helpers do not composite; tagging those looks like overlay
+   * on in the log with nothing on screen.
    *
    * @param dpy X11 display.
    * @return Window id, or `None`.
@@ -313,7 +317,10 @@ namespace {
   Window find_steam_overlay_window(Display *dpy) {
     const auto titled = find_window(dpy, platf::gamescope::title_is_steam_big_picture);
     if (titled != None) {
-      return titled;
+      XWindowAttributes titled_attr {};
+      if (XGetWindowAttributes(dpy, titled, &titled_attr) && titled_attr.map_state == IsViewable) {
+        return titled;
+      }
     }
 
     std::vector<Window> windows;
@@ -321,9 +328,11 @@ namespace {
     Window overlay_on = None;
     Window sized = None;
     int sized_area = -1;
-    Window any_client = None;
-    int any_area = -1;
     for (const auto window : windows) {
+      XWindowAttributes attr {};
+      if (!XGetWindowAttributes(dpy, window, &attr) || attr.map_state != IsViewable || attr.width <= 0 || attr.height <= 0) {
+        continue;
+      }
       if (overlay_is_on(dpy, window)) {
         overlay_on = window;
       }
@@ -331,15 +340,7 @@ namespace {
       if (!steam_game || *steam_game != platf::gamescope::STEAM_CLIENT_APPID) {
         continue;
       }
-      XWindowAttributes attr {};
-      if (!XGetWindowAttributes(dpy, window, &attr) || attr.width <= 0 || attr.height <= 0) {
-        continue;
-      }
       const int area = attr.width * attr.height;
-      if (area > any_area) {
-        any_client = window;
-        any_area = area;
-      }
       if (attr.width >= 1280 && attr.height >= 720 && area > sized_area) {
         sized = window;
         sized_area = area;
@@ -348,10 +349,22 @@ namespace {
     if (overlay_on != None) {
       return overlay_on;
     }
-    if (sized != None) {
-      return sized;
-    }
-    return any_client;
+    return sized;
+  }
+
+  /**
+   * @brief Ask the running Steam client to toggle Game Mode overlay.
+   *
+   * GDS `STEAM_OVERLAY` only composites when Steam Big Picture is mapped.
+   * Standalone Flatpak games often leave only an unmapped steamwebhelper.
+   * `steam://overlay/toggle` is Steam's own IPC (same as `steam -ifrunning`).
+   */
+  void steam_overlay_toggle_via_steam() {
+    std::thread([] {
+      // DISPLAY is unset in kms. Steam's X11 client still talks to session :0.
+      (void) std::system("env DISPLAY=:0 /usr/bin/steam -ifrunning steam://overlay/toggle >/dev/null 2>&1");
+    }).detach();
+    BOOST_LOG(info) << "gamescope overlay: steam://overlay/toggle (no mapped Big Picture)"sv;
   }
 
   /**
@@ -657,13 +670,17 @@ namespace platf {
     }
 
     const auto bpm = find_steam_overlay_window(dpy);
-    if (bpm == None) {
-      BOOST_LOG(warning) << "gamescope overlay: no Steam Big Picture / STEAM_GAME=769 window"sv;
-      return;
-    }
     const auto tv = find_window(dpy, platf::gamescope::title_is_hdmi_surface);
     remember_appid(dpy, tv);
     const auto appid = remembered_appid;
+    if (bpm == None) {
+      steam_overlay_toggle_via_steam();
+      if (appid != 0) {
+        set_cardinal(dpy, DefaultRootWindow(dpy), "GAMESCOPE_FOCUSED_APP_GFX", appid);
+        XFlush(dpy);
+      }
+      return;
+    }
     if (platf::gamescope::overlay_toggle_action(overlay_is_on(dpy, bpm)) == platf::gamescope::overlay_action_e::hide) {
       hide_overlay(dpy, bpm, tv, appid);
     } else {
