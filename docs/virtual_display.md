@@ -127,14 +127,17 @@ video/1 stays black.
 
 Hold-Select (`back_button_timeout`) pulses HOME on the libvirtualhid x360.
 That pad is UHID bluetooth, so Steam Game Mode ignores Guide. Sunshine then
-toggles `STEAM_OVERLAY` on Steam Big Picture plus `GAMESCOPE_FOCUSED_APP=769`.
+toggles `STEAM_OVERLAY` on Steam Big Picture (or the largest `STEAM_GAME=769`
+window when that title is missing) plus `GAMESCOPE_FOCUSED_APP=769`.
 Display-index-1 finger taps from Fangoh Moonlight are **absolute mouse**
 (`sendMousePositionOnDisplay(..., displayIndex=1)` plus a later button packet
 with no display index). Native `LiSendTouchEvent` is compiled out. Sunshine
-maps those packets onto Cemu **GamePad View** on session gamescope (`:0`):
+maps those packets onto Cemu **GamePad View** or Azahar **Secondary Window**
+on session gamescope (`:0`):
 normalize desktop pixels, `XOpenDisplay(":0")` (kms unsets `$DISPLAY`, so
 `XOpenDisplay(nullptr)` was a silent no-op), `XWarpPointer` so `XQueryPointer`
-matches, then `XSendEvent` mask `0` to the GamePad GL child. The following
+matches, then `XSendEvent` mask `0` to the GamePad / Azahar GL child. Overlay
+hide restores Cemu TV or Azahar **Primary Window**. The following
 mouse-button packet still goes to host uinput at that warped cursor — wx/GTK
 often ignore synthetic `send_event`. Host uinput abs-move on display 1 is
 skipped (wrong coordinate space). Odin **GamePad only** is display 0 with

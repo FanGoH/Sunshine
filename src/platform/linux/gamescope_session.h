@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/gamescope_session.h
- * @brief Gamescope overlay toggle and Cemu GamePad View touch injection.
+ * @brief Gamescope overlay toggle and GamePad / Azahar touch injection.
  */
 #pragma once
 
@@ -52,6 +52,30 @@ namespace platf::gamescope {
   [[nodiscard]] bool title_is_cemu_tv(std::string_view title);
 
   /**
+   * @brief True when an X11 title is the Moonlight GamePad / 3DS-bottom surface.
+   *
+   * Cemu uses `GamePad View`. Azahar Separate Windows uses `Secondary Window`
+   * for the touch screen. The library caption without Primary/Secondary is not
+   * a touch target.
+   *
+   * @param title Window title, including UTF-8 `_NET_WM_NAME`.
+   * @return True for Cemu GamePad View or Azahar Secondary Window.
+   */
+  [[nodiscard]] bool title_is_touch_surface(std::string_view title);
+
+  /**
+   * @brief True when an X11 title is the HDMI / TV game surface.
+   *
+   * Overlay hide restores this window as `GAMESCOPECTRL_BASELAYER_WINDOW`.
+   * Azahar top screen is `Primary Window`. Do not match the library window or
+   * the touch surface.
+   *
+   * @param title Window title.
+   * @return True for Cemu TV or Azahar Primary Window.
+   */
+  [[nodiscard]] bool title_is_hdmi_surface(std::string_view title);
+
+  /**
    * @brief Map a normalized touch point onto a window in pixels.
    *
    * @param x Horizontal coordinate in `[0, 1]`.
@@ -81,7 +105,7 @@ namespace platf::gamescope {
   [[nodiscard]] std::pair<float, float> abs_to_unit(float x, float y, int offset_x, int offset_y, int width, int height);
 
   /**
-   * @brief X11 display name for session gamescope (Cemu TV + GamePad View).
+   * @brief X11 display name for session gamescope (HDMI + touch surfaces).
    *
    * Game Mode kms unsets `$DISPLAY` so capture is not X11. `XOpenDisplay(nullptr)`
    * then fails and GamePad inject becomes a no-op. Headless video/1 is `:2`.
@@ -101,11 +125,11 @@ namespace platf::gamescope {
   /**
    * @brief Pick the Steam shortcut id to restore after overlay close.
    *
-   * Prefers `STEAM_GAME` on the Cemu TV window. Falls back to
-   * `GAMESCOPE_FOCUSED_APP_GFX` or `GAMESCOPE_FOCUSED_APP` when those are not
-   * the Steam client id.
+   * Prefers `STEAM_GAME` on the HDMI game window (Cemu TV or Azahar Primary).
+   * Falls back to `GAMESCOPE_FOCUSED_APP_GFX` or `GAMESCOPE_FOCUSED_APP` when
+   * those are not the Steam client id.
    *
-   * @param steam_game `STEAM_GAME` on the game window, if present.
+   * @param steam_game `STEAM_GAME` on the HDMI game window, if present.
    * @param focused_app Root `GAMESCOPE_FOCUSED_APP`.
    * @param focused_gfx Root `GAMESCOPE_FOCUSED_APP_GFX`.
    * @param steam_client_id Steam client id to ignore (`769`).
@@ -149,25 +173,27 @@ namespace platf {
    *
    * libvirtualhid x360 is UHID bluetooth (`045e:028e` bus `0005`). Steam Game
    * Mode does not honor Guide on that path. `back_button_timeout` already
-   * pulses HOME; this writes `STEAM_OVERLAY` on Steam Big Picture plus
-   * `GAMESCOPE_FOCUSED_APP=769`. No-op when Big Picture is missing.
+   * pulses HOME; this writes `STEAM_OVERLAY` on Steam Big Picture (or the
+   * largest `STEAM_GAME=769` window when that title is missing) plus
+   * `GAMESCOPE_FOCUSED_APP=769`. No-op when no Steam client surface exists.
    */
   void gamescope_on_guide_press();
 
   /**
-   * @brief Send a display-1 touch to Cemu GamePad View instead of host uinput.
+   * @brief Send a display-1 touch to the GamePad / Azahar bottom window.
    *
-   * Game Mode keeps TV and GamePad stacked at `:0` `0,0`. Host uinput hits the
-   * raised TV. XSendEvent targets the GamePad X11 window without raising it.
+   * Game Mode keeps HDMI and the touch surface stacked at `:0` `0,0`. Host
+   * uinput hits the raised TV / Primary Window. XSendEvent targets GamePad
+   * View or Azahar Secondary Window without raising it.
    *
    * @param touch_port Viewport used to size the event (unused for 0–1 coords).
    * @param touch Touch event in monitor-local `[0, 1]` coordinates.
-   * @return True when the event was delivered to GamePad View.
+   * @return True when the event was delivered to the touch surface.
    */
   bool inject_gamepad_view_touch(const touch_port_t &touch_port, const touch_input_t &touch);
 
   /**
-   * @brief Move the GamePad View pointer from a display-1 absolute mouse packet.
+   * @brief Move the GamePad / Azahar-bottom pointer from a display-1 abs mouse packet.
    *
    * Fangoh Moonlight maps finger taps with `sendMousePositionOnDisplay(..., 1)`
    * plus a later mouse-button packet that has no display index. Host uinput
@@ -177,16 +203,16 @@ namespace platf {
    * @param touch_port Display-1 touch port (`offset` + env size in pixels).
    * @param x Desktop-space X from `client_to_touchport`.
    * @param y Desktop-space Y from `client_to_touchport`.
-   * @return True when GamePad View received the motion.
+   * @return True when the touch surface received the motion.
    */
   bool inject_gamepad_view_abs_mouse(const touch_port_t &touch_port, float x, float y);
 
   /**
-   * @brief Click GamePad View after a display-1 absolute mouse move.
+   * @brief Click the GamePad / Azahar-bottom window after a display-1 abs mouse move.
    *
    * @param button Moonlight mouse button (`BUTTON_LEFT` is `1`, same as X11).
    * @param release True for button-up.
-   * @return True when GamePad View received the button event.
+   * @return True when the touch surface received the button event.
    */
   bool inject_gamepad_view_button(int button, bool release);
 

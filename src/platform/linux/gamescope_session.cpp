@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/gamescope_session.cpp
- * @brief Gamescope overlay toggle and Cemu GamePad View touch injection.
+ * @brief Gamescope overlay toggle and GamePad / Azahar touch injection.
  */
 
 // standard includes
@@ -42,6 +42,23 @@ namespace platf::gamescope {
       return false;
     }
     return title.find("Cemu ") != std::string_view::npos;
+  }
+
+  bool title_is_touch_surface(std::string_view title) {
+    if (title_is_gamepad_view(title)) {
+      return true;
+    }
+    return title.find("Secondary Window") != std::string_view::npos;
+  }
+
+  bool title_is_hdmi_surface(std::string_view title) {
+    if (title_is_touch_surface(title)) {
+      return false;
+    }
+    if (title_is_cemu_tv(title)) {
+      return true;
+    }
+    return title.find("Primary Window") != std::string_view::npos;
   }
 
   std::pair<int, int> touch_to_window_xy(float x, float y, int width, int height) {
@@ -103,7 +120,7 @@ namespace {
 
   std::mutex x11_lock;  ///< Serializes Xlib calls on the cached display.
   Display *cached_display = nullptr;  ///< Reused X11 connection for `:0` gamescope.
-  Window cached_pad = None;  ///< Last Cemu GamePad View xid.
+  Window cached_pad = None;  ///< Last GamePad View / Azahar Secondary xid.
   bool pad_pointer_down = false;  ///< True while display-1 contact is held on GamePad View.
   int last_pad_x = 0;  ///< Last GamePad-local pointer X (for mouse-button packets).
   int last_pad_y = 0;  ///< Last GamePad-local pointer Y (for mouse-button packets).
@@ -283,10 +300,65 @@ namespace {
   }
 
   /**
+   * @brief Find the Steam window that owns `STEAM_OVERLAY`.
+   *
+   * Prefers a `Steam Big Picture Mode` title. Game Mode sometimes leaves only
+   * a `steamwebhelper` with `STEAM_GAME=769` (no BPM caption) — overlay toggle
+   * is a silent no-op without that fallback. Prefer an already-on overlay atom,
+   * then a BPM-sized surface, then the largest 769 window.
+   *
+   * @param dpy X11 display.
+   * @return Window id, or `None`.
+   */
+  Window find_steam_overlay_window(Display *dpy) {
+    const auto titled = find_window(dpy, platf::gamescope::title_is_steam_big_picture);
+    if (titled != None) {
+      return titled;
+    }
+
+    std::vector<Window> windows;
+    collect_windows(dpy, DefaultRootWindow(dpy), windows);
+    Window overlay_on = None;
+    Window sized = None;
+    int sized_area = -1;
+    Window any_client = None;
+    int any_area = -1;
+    for (const auto window : windows) {
+      if (overlay_is_on(dpy, window)) {
+        overlay_on = window;
+      }
+      const auto steam_game = get_cardinal(dpy, window, "STEAM_GAME");
+      if (!steam_game || *steam_game != platf::gamescope::STEAM_CLIENT_APPID) {
+        continue;
+      }
+      XWindowAttributes attr {};
+      if (!XGetWindowAttributes(dpy, window, &attr) || attr.width <= 0 || attr.height <= 0) {
+        continue;
+      }
+      const int area = attr.width * attr.height;
+      if (area > any_area) {
+        any_client = window;
+        any_area = area;
+      }
+      if (attr.width >= 1280 && attr.height >= 720 && area > sized_area) {
+        sized = window;
+        sized_area = area;
+      }
+    }
+    if (overlay_on != None) {
+      return overlay_on;
+    }
+    if (sized != None) {
+      return sized;
+    }
+    return any_client;
+  }
+
+  /**
    * @brief Remember the running shortcut id for overlay hide.
    *
    * @param dpy X11 display.
-   * @param tv Cemu TV window, or `None`.
+   * @param tv HDMI game window (Cemu TV or Azahar Primary), or `None`.
    */
   void remember_appid(Display *dpy, Window tv) {
     std::optional<std::uint32_t> steam_game;
@@ -323,11 +395,11 @@ namespace {
   }
 
   /**
-   * @brief Close the overlay and restore Cemu TV as the HDMI baselayer.
+   * @brief Close the overlay and restore the HDMI game surface as the baselayer.
    *
    * @param dpy X11 display.
-   * @param bpm Steam Big Picture window, or `None`.
-   * @param tv Cemu TV window, or `None`.
+   * @param bpm Steam overlay window, or `None`.
+   * @param tv HDMI game window (Cemu TV or Azahar Primary), or `None`.
    * @param appid Shortcut id to restore.
    */
   void hide_overlay(Display *dpy, Window bpm, Window tv, std::uint32_t appid) {
@@ -349,7 +421,7 @@ namespace {
   }
 
   /**
-   * @brief Return the Cemu GamePad View window, refreshing a stale cache.
+   * @brief Return the GamePad View or Azahar Secondary Window, refreshing a stale cache.
    *
    * @param dpy X11 display.
    * @return Window id, or `None`.
@@ -358,11 +430,14 @@ namespace {
     if (cached_pad != None) {
       XWindowAttributes attr {};
       if (XGetWindowAttributes(dpy, cached_pad, &attr) && attr.width > 0 && attr.height > 0) {
-        return cached_pad;
+        const auto title = window_title(dpy, cached_pad);
+        if (platf::gamescope::title_is_touch_surface(title)) {
+          return cached_pad;
+        }
       }
       cached_pad = None;
     }
-    cached_pad = find_window(dpy, platf::gamescope::title_is_gamepad_view);
+    cached_pad = find_window(dpy, platf::gamescope::title_is_touch_surface);
     return cached_pad;
   }
 
@@ -533,7 +608,7 @@ namespace {
     if (pad == None) {
       static bool logged_missing = false;
       if (!logged_missing) {
-        BOOST_LOG(warning) << "GamePad inject: no GamePad View window on "sv << platf::gamescope::session_x11_name();
+        BOOST_LOG(warning) << "GamePad inject: no GamePad View / Azahar Secondary Window on "sv << platf::gamescope::session_x11_name();
         logged_missing = true;
       }
       return false;
@@ -581,12 +656,12 @@ namespace platf {
       return;
     }
 
-    const auto bpm = find_window(dpy, platf::gamescope::title_is_steam_big_picture);
+    const auto bpm = find_steam_overlay_window(dpy);
     if (bpm == None) {
-      BOOST_LOG(debug) << "gamescope overlay: no Steam Big Picture window"sv;
+      BOOST_LOG(warning) << "gamescope overlay: no Steam Big Picture / STEAM_GAME=769 window"sv;
       return;
     }
-    const auto tv = find_window(dpy, platf::gamescope::title_is_cemu_tv);
+    const auto tv = find_window(dpy, platf::gamescope::title_is_hdmi_surface);
     remember_appid(dpy, tv);
     const auto appid = remembered_appid;
     if (platf::gamescope::overlay_toggle_action(overlay_is_on(dpy, bpm)) == platf::gamescope::overlay_action_e::hide) {

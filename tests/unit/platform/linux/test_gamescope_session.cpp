@@ -1,6 +1,6 @@
 /**
  * @file tests/unit/platform/linux/test_gamescope_session.cpp
- * @brief Tests for Game Mode overlay title matching and GamePad touch mapping.
+ * @brief Tests for Game Mode overlay title matching and GamePad / Azahar touch mapping.
  */
 #ifdef __linux__
   // test includes
@@ -22,12 +22,28 @@ TEST(GamescopeSessionTest, MatchesSteamBigPictureTitle) {
 TEST(GamescopeSessionTest, MatchesGamepadViewTitle) {
   EXPECT_TRUE(platf::gamescope::title_is_gamepad_view("GamePad View - FPS: 30.00"));
   EXPECT_FALSE(platf::gamescope::title_is_gamepad_view("Cemu 2.6 - FPS: 30.00"));
+  EXPECT_FALSE(platf::gamescope::title_is_gamepad_view("Azahar 2126.0 | SUPER MARIO 3D LAND | Secondary Window"));
 }
 
 TEST(GamescopeSessionTest, MatchesCemuTvAndSkipsHelper) {
   EXPECT_TRUE(platf::gamescope::title_is_cemu_tv("Cemu 2.6 - FPS: 30.00 [OpenGL] The Wind Waker HD"));
   EXPECT_FALSE(platf::gamescope::title_is_cemu_tv("GamePad View - FPS: 30.00"));
   EXPECT_FALSE(platf::gamescope::title_is_cemu_tv("Cemu_relwithdebinfo"));
+}
+
+TEST(GamescopeSessionTest, MatchesAzaharTouchAndHdmiSurfaces) {
+  constexpr auto kPrimary = "Azahar 2126.0 | SUPER MARIO 3D LAND | Primary Window";
+  constexpr auto kSecondary = "Azahar 2126.0 | SUPER MARIO 3D LAND | Secondary Window";
+  constexpr auto kLibrary = "Azahar 2126.0 | SUPER MARIO 3D LAND";
+  EXPECT_TRUE(platf::gamescope::title_is_touch_surface("GamePad View - FPS: 30.00"));
+  EXPECT_TRUE(platf::gamescope::title_is_touch_surface(kSecondary));
+  EXPECT_FALSE(platf::gamescope::title_is_touch_surface(kPrimary));
+  EXPECT_FALSE(platf::gamescope::title_is_touch_surface(kLibrary));
+  EXPECT_TRUE(platf::gamescope::title_is_hdmi_surface("Cemu 2.6 - FPS: 30.00 [OpenGL] The Wind Waker HD"));
+  EXPECT_TRUE(platf::gamescope::title_is_hdmi_surface(kPrimary));
+  EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface(kSecondary));
+  EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface(kLibrary));
+  EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface("GamePad View - FPS: 30.00"));
 }
 
 TEST(GamescopeSessionTest, MapsNormalizedTouchOntoWindowPixels) {
