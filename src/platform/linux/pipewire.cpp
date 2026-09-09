@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -1960,17 +1961,59 @@ namespace pipewire {
       }
     }
 
+    /**
+     * @brief Query EGL DMA-BUF modifiers for PipeWire format negotiation.
+     *
+     * Game Mode has no `wayland-0`. Try `WAYLAND_DISPLAY`, then the headless
+     * virtual compositor, then session gamescope. Missing Wayland is not fatal:
+     * software encode can still consume MemFd from an existing PipeWire node.
+     *
+     * @return 0 when modifiers were queried or skipped.
+     */
     int get_dmabuf_modifiers() {
       n_dmabuf_infos = 0;
       capture_egl_ready = false;
 
-      if (wl_display.init() < 0) {
-        return -1;
+      auto socket_exists = [](const char *name) -> bool {
+        if (!name || !name[0]) {
+          return false;
+        }
+        const char *rt = std::getenv("XDG_RUNTIME_DIR");
+        if (!rt || !rt[0]) {
+          return false;
+        }
+        std::string path {rt};
+        path.push_back('/');
+        path.append(name);
+        return access(path.c_str(), F_OK) == 0;
+      };
+
+      const char *names[] = {nullptr, "gamescope-1", "gamescope-0", "wayland-0"};
+      bool have_wl = false;
+      for (auto *name : names) {
+        if (name && !socket_exists(name)) {
+          continue;
+        }
+        if (!name) {
+          const char *env = std::getenv("WAYLAND_DISPLAY");
+          if (!env || !env[0] || !socket_exists(env)) {
+            continue;
+          }
+        }
+        if (wl_display.init(name) == 0) {
+          have_wl = true;
+          break;
+        }
+      }
+      if (!have_wl) {
+        BOOST_LOG(warning) << "[pipewire] No Wayland display for DMA-BUF modifiers; MemFd only"sv;
+        return 0;
       }
 
       capture_egl_display = egl::make_display(wl_display.get());
       if (!capture_egl_display) {
-        return -1;
+        BOOST_LOG(warning) << "[pipewire] EGL display unavailable; MemFd only"sv;
+        return 0;
       }
 
       if (auto ctx_opt = egl::make_ctx(capture_egl_display.get())) {
