@@ -29,6 +29,8 @@ Set `dual_display_source` in `sunshine.conf`:
 | --- | --- |
 | *(empty)* | The feature is off. This is the default. |
 | `virtual` | Acquire a supported virtual display for the client's second panel. |
+| `gamescope-virtual` | Linux Game Mode: capture a headless gamescope PipeWire node (not KWin). |
+| `pipewire:<serial>` | Linux: capture that PipeWire `object.serial` as video/1. |
 | anything else | Capture the real monitor identified by that output name or stable device identifier. |
 
 The server advertises two-stream support only when the configured source can be
@@ -110,6 +112,16 @@ On KWin 6.7, `stream_virtual_output` often fails immediately with
 `Could not find output` (`workspace()->findOutput` before the LogicalOutput
 exists). The helper must keep the Wayland stream open anyway, then enable the
 output with `kscreen-doctor`. Exiting the helper removes `Virtual-sunshine-ds`.
+
+### Linux / Game Mode headless gamescope
+
+Gamescope has no `zkde_screencast_unstable_v1`. A second KMS plane does not
+exist for a Cemu GamePad either. The playbook holds a *headless* gamescope
+(`--backend headless`) that publishes a PipeWire `Video/Source`. Set
+`capture = kms` for HDMI on video/0 and `dual_display_source = gamescope-virtual`
+so video/1 attaches to that node (sidecar `$XDG_RUNTIME_DIR/sunshine-ds-gamemode-virtual`,
+or `pipewire:<object.serial>`). Do not set `virtual` here — that still spawns
+the KWin helper.
 
 ## Behavior without a supported source
 

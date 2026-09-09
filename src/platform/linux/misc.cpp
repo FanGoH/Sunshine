@@ -1194,6 +1194,10 @@ namespace platf {
   }
 #endif
 
+#if defined(SUNSHINE_BUILD_KWIN) || defined(SUNSHINE_BUILD_PORTAL)
+  std::shared_ptr<display_t> pipewire_node_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+#endif
+
 #ifdef SUNSHINE_BUILD_KWIN
   bool kwin_available();
   std::vector<std::string> kwin_display_names();
@@ -1262,6 +1266,15 @@ namespace platf {
   }
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+#if defined(SUNSHINE_BUILD_KWIN) || defined(SUNSHINE_BUILD_PORTAL)
+    // Game Mode second stream: existing PipeWire node (headless gamescope).
+    // capture=kms stays on HDMI for video/0; this name is not a DRM connector.
+    if (display_name == "gamescope-virtual" || display_name.rfind("pipewire:", 0) == 0) {
+      BOOST_LOG(info) << "Screencasting with PipeWire node "sv << display_name;
+      return pipewire_node_display(hwdevice_type, display_name, config);
+    }
+#endif
+
     // Keep KMS as first element to check before dropping CAP_SYS_ADMIN
 #ifdef SUNSHINE_BUILD_DRM
     if (sources[source::KMS]) {

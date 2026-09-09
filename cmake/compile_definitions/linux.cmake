@@ -261,7 +261,8 @@ if(PIPEWIRE_FOUND)
     include_directories(SYSTEM ${PIPEWIRE_INCLUDE_DIRS})
     list(APPEND PLATFORM_LIBRARIES ${PIPEWIRE_LIBRARIES})
     list(APPEND PLATFORM_TARGET_FILES
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewire.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewire.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pwgrab.cpp")
 endif()
 
 # XDG portal

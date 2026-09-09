@@ -75,6 +75,24 @@ namespace dual_display {
     constexpr auto VIRTUAL = "virtual"sv;
 
     /**
+     * @brief Game Mode second stream: headless gamescope PipeWire node.
+     *
+     * Not the KWin helper (`virtual` / `Virtual-sunshine-ds`). Primary capture
+     * can stay KMS. Do not treat this name as a DRM connector.
+     */
+    constexpr auto GAMESCOPE_VIRTUAL = "gamescope-virtual"sv;
+
+    /**
+     * @brief Whether the configured second display is an existing PipeWire node.
+     *
+     * @param source `dual_display_source` value.
+     * @return True for `gamescope-virtual` or `pipewire:<serial>`.
+     */
+    [[nodiscard]] bool is_pipewire_second_display(std::string_view source) {
+      return source == GAMESCOPE_VIRTUAL || source.rfind("pipewire:", 0) == 0;
+    }
+
+    /**
      * @brief A real monitor that already exists.
      *
      * Nothing is created and nothing is destroyed; the lease is a name and a
@@ -1800,6 +1818,10 @@ namespace dual_display {
       return virtual_display_available();
     }
 
+    if (is_pipewire_second_display(source)) {
+      return true;
+    }
+
 #ifdef __linux__
     // Named Virtual-* is the playbook GamePad output. Do not require
     // kwin_display_names: that returns a dummy "" while still elevated
@@ -1831,6 +1853,14 @@ namespace dual_display {
 
     if (source == VIRTUAL) {
       return acquire_virtual_display(request);
+    }
+
+    if (is_pipewire_second_display(source)) {
+      BOOST_LOG(info) << "Second display: PipeWire "sv << source
+                      << " at "sv << request.width << 'x' << request.height
+                      << '@' << request.framerate
+                      << " (headless gamescope; not KWin, not KMS)"sv;
+      return std::make_unique<physical_lease_t>(std::string {source});
     }
 
 #ifdef __linux__
