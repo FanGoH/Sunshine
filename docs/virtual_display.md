@@ -121,7 +121,9 @@ exist for a Cemu GamePad either. The playbook holds a *headless* gamescope
 `capture = kms` for HDMI on video/0 and `dual_display_source = gamescope-virtual`
 so video/1 attaches to that node (sidecar `$XDG_RUNTIME_DIR/sunshine-ds-gamemode-virtual`,
 or `pipewire:<object.serial>`). Do not set `virtual` here — that still spawns
-the KWin helper.
+the KWin helper. A static surface may emit only one PipeWire buffer; software
+encode must copy that CPU frame into `dummy_img()` and re-present it, or
+video/1 stays black.
 
 ## Behavior without a supported source
 

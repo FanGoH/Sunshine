@@ -1368,7 +1368,10 @@ namespace pipewire {
         verify_and_update_display_parameters();
       }
 
-      if (mem_type == platf::mem_type_e::system && capture_egl_ready) {
+      // MemFd sources (headless gamescope) already copied a CPU frame in
+      // on_process. The DMA-BUF probe consumes that first buffer and a static
+      // surface may never emit another — encode then keeps dummy_img() black.
+      if (mem_type == platf::mem_type_e::system && capture_egl_ready && !pipewire.is_cpu_frame_valid()) {
         static std::atomic<bool> software_dmabuf_probed {false};
         if (!software_dmabuf_probed.exchange(true)) {
           int best_nonzero = -1;
@@ -1392,6 +1395,8 @@ namespace pipewire {
             }
           }
         }
+      } else if (pipewire.is_cpu_frame_valid()) {
+        BOOST_LOG(info) << "[pipewire] skip software DMA-BUF probe; CPU frame already valid"sv;
       }
 
       return 0;
@@ -1519,6 +1524,38 @@ namespace pipewire {
     }
 
     /**
+     * @brief Copy the last PipeWire CPU frame into `img_out`.
+     *
+     * Headless gamescope may publish one MemFd and then go silent while the
+     * surface is static. Re-present that buffer so encode does not keep the
+     * black `dummy_img()` IDR.
+     *
+     * @param pull_free_image_cb Callback that provides an available image buffer.
+     * @param img_out Image to fill, allocated if empty.
+     * @return True when `img_out` holds nonzero CPU pixels.
+     */
+    bool present_last_cpu_frame(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out) {
+      if (!pipewire.is_cpu_frame_valid()) {
+        return false;
+      }
+      if (!img_out && !pull_free_image_cb(img_out)) {
+        return false;
+      }
+      auto *img_egl = static_cast<egl::img_descriptor_t *>(img_out.get());
+      if (!img_egl) {
+        return false;
+      }
+      img_egl->reset();
+      pipewire.fill_img(img_egl);
+      const auto nbytes = static_cast<size_t>(std::max(img_egl->height, 0)) * static_cast<size_t>(std::max(img_egl->row_pitch, 0));
+      if (!img_egl->data || count_nonzero_samples(img_egl->data, nbytes) == 0) {
+        return false;
+      }
+      update_metadata(img_egl, 0);
+      return true;
+    }
+
+    /**
      * @brief Capture a display frame into the provided image object.
      *
      * @param pull_free_image_cb Callback that provides an available image buffer.
@@ -1532,9 +1569,11 @@ namespace pipewire {
       auto deadline = std::chrono::steady_clock::now() + timeout;
       int retries = 0;
 
-      while (std::chrono::steady_clock::now() < deadline) {
-        if (!wait_for_frame(deadline)) {
-          return platf::capture_e::timeout;
+      // A 0ms timeout must still consume a buffer that is already waiting.
+      while (pipewire.is_frame_ready() || std::chrono::steady_clock::now() < deadline) {
+        const auto wait_until = pipewire.is_frame_ready() ? std::chrono::steady_clock::now() : deadline;
+        if (!wait_for_frame(wait_until)) {
+          break;
         }
 
         if (!pull_free_image_cb(img_out)) {
@@ -1572,6 +1611,17 @@ namespace pipewire {
 
         // No valid frame yet, or it was a duplicate
         retries++;
+        if (pipewire.is_cpu_frame_valid() && !pipewire.is_frame_ready()) {
+          break;
+        }
+      }
+
+      if (present_last_cpu_frame(pull_free_image_cb, img_out)) {
+        static std::atomic<int> replay {0};
+        if (replay.fetch_add(1) < 4) {
+          BOOST_LOG(info) << "[pipewire] re-present last CPU frame (static PipeWire source)"sv;
+        }
+        return platf::capture_e::ok;
       }
       return platf::capture_e::timeout;
     }
@@ -1639,7 +1689,10 @@ namespace pipewire {
         }
 
         std::shared_ptr<platf::img_t> img_out;
-        switch (const auto status = snapshot(pull_free_image_cb, img_out, 1000ms, *cursor)) {
+        // Paced capture (Game Mode gamescope is variable-rate): do not block 1s
+        // waiting for damage. Re-present the last CPU frame at the encode rate.
+        const auto snap_timeout = (pacing_required && pipewire.is_cpu_frame_valid()) ? 0ms : 1000ms;
+        switch (const auto status = snapshot(pull_free_image_cb, img_out, snap_timeout, *cursor)) {
           case platf::capture_e::reinit:
           case platf::capture_e::error:
           case platf::capture_e::interrupted:
@@ -1715,9 +1768,9 @@ namespace pipewire {
      */
     int dummy_img(platf::img_t *img) override {
       // Software encoders convert the dummy image immediately; provide a valid
-      // (black) buffer instead of leaving img->data null, which makes sws fail
-      // with EINVAL. The buffer is new[]-allocated and marked as owned so the
-      // destructor releases it.
+      // buffer instead of leaving img->data null, which makes sws fail with
+      // EINVAL. Prefer the last PipeWire CPU frame so the first IDR is not
+      // black when the source is a static gamescope surface.
       if (img->data == nullptr) {
         const auto w = img->width;
         const auto h = img->height;
@@ -1726,6 +1779,16 @@ namespace pipewire {
           static_cast<img_descriptor_t *>(img)->data_owned = true;
           img->row_pitch = w * 4;
           img->pixel_pitch = 4;
+        }
+      }
+      if (pipewire.is_cpu_frame_valid() && img->data) {
+        pipewire.fill_img(img);
+        const auto nbytes = static_cast<size_t>(std::max(img->height, 0)) * static_cast<size_t>(std::max(img->row_pitch, 0));
+        static std::atomic<int> n {0};
+        if (n.fetch_add(1) < 4) {
+          BOOST_LOG(info) << "[pipewire] dummy_img last CPU frame nonzero="sv
+                          << count_nonzero_samples(img->data, nbytes) << "/"sv << nbytes
+                          << " pixel_diffs="sv << count_pixel_diffs(img->data, nbytes);
         }
       }
       return 0;
