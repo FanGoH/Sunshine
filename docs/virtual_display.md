@@ -132,11 +132,12 @@ Display-index-1 finger taps from Fangoh Moonlight are **absolute mouse**
 (`sendMousePositionOnDisplay(..., displayIndex=1)` plus a later button packet
 with no display index). Native `LiSendTouchEvent` is compiled out. Sunshine
 maps those packets onto Cemu **GamePad View** on session gamescope (`:0`):
-normalize desktop pixels, `XWarpPointer` so `XQueryPointer` matches, then
-`XSendEvent` mask `0` to the GamePad GL child (not the wx frame). Host uinput
-would hit the raised TV at the same `0,0`, and a bare click would land at the
-gamescope cursor (often screen center — Wind Waker's item pad). Do not raise
-GamePad over TV (HDMI would show the pad).
+normalize desktop pixels, `XOpenDisplay(":0")` (kms unsets `$DISPLAY`, so
+`XOpenDisplay(nullptr)` was a silent no-op), `XWarpPointer` so `XQueryPointer`
+matches, then `XSendEvent` mask `0` to the GamePad GL child. The following
+mouse-button packet still goes to host uinput at that warped cursor — wx/GTK
+often ignore synthetic `send_event`. Host uinput abs-move on display 1 is
+skipped (wrong coordinate space). Do not raise GamePad over TV.
 
 ## Behavior without a supported source
 

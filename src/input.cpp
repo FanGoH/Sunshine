@@ -945,8 +945,9 @@ namespace input {
   void emit_mouse_button(const std::shared_ptr<input_t> &input, int button, bool release) {
 #ifdef __linux__
     if (input->last_abs_display == 1 && config::video.dual_display_source == "gamescope-virtual"sv) {
+      // Warp + XSendEvent first. wx/GTK often ignores send_event, so still emit
+      // a real uinput click at the warped cursor (stacked TV/GamePad share it).
       static_cast<void>(platf::inject_gamepad_view_button(button, release));
-      return;
     }
 #endif
     platf::button_mouse(platf_input, button, release);

@@ -59,6 +59,10 @@ namespace platf::gamescope {
     return {nx, ny};
   }
 
+  const char *session_x11_name() {
+    return ":0";
+  }
+
   overlay_action_e overlay_toggle_action(bool overlay_is_on) {
     return overlay_is_on ? overlay_action_e::hide : overlay_action_e::show;
   }
@@ -127,11 +131,13 @@ namespace {
       return cached_display;
     }
     XInitThreads();
-    cached_display = XOpenDisplay(nullptr);
+    // Do not use `$DISPLAY`. kms unsets it; a leftover `:2` is headless gamescope.
+    cached_display = XOpenDisplay(platf::gamescope::session_x11_name());
     if (!cached_display) {
-      BOOST_LOG(debug) << "gamescope session: XOpenDisplay failed"sv;
+      BOOST_LOG(warning) << "gamescope session: XOpenDisplay "sv << platf::gamescope::session_x11_name() << " failed"sv;
       return nullptr;
     }
+    BOOST_LOG(info) << "gamescope session: XOpenDisplay "sv << DisplayString(cached_display);
     previous_x11_error = XSetErrorHandler(ignore_stale_window);
     return cached_display;
   }
@@ -518,6 +524,11 @@ namespace {
   bool inject_unit(Display *dpy, float nx, float ny, std::string_view kind, int type, unsigned int state, unsigned int button) {
     const auto pad = gamepad_view_window(dpy);
     if (pad == None) {
+      static bool logged_missing = false;
+      if (!logged_missing) {
+        BOOST_LOG(warning) << "GamePad inject: no GamePad View window on "sv << platf::gamescope::session_x11_name();
+        logged_missing = true;
+      }
       return false;
     }
     const auto target = gamepad_input_window(dpy, pad);

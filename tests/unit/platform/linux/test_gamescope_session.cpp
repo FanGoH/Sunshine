@@ -68,6 +68,10 @@ TEST(GamescopeSessionTest, ResolvesOverlayAppid) {
   EXPECT_EQ(platf::gamescope::resolve_overlay_appid(769U, 769U, 769U), 0U);
 }
 
+TEST(GamescopeSessionTest, SessionX11IsGamescopeZero) {
+  EXPECT_STREQ(platf::gamescope::session_x11_name(), ":0");
+}
+
 TEST(GamescopeSessionTest, DetectsSecondDisplayPointerBit) {
   EXPECT_FALSE(platf::gamescope::touch_is_second_display(3));
   EXPECT_TRUE(platf::gamescope::touch_is_second_display(3U | platf::gamescope::TOUCH_SECOND_DISPLAY_POINTER));

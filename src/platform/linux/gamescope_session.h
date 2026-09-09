@@ -80,6 +80,16 @@ namespace platf::gamescope {
   [[nodiscard]] std::pair<float, float> abs_to_unit(float x, float y, int offset_x, int offset_y, int width, int height);
 
   /**
+   * @brief X11 display name for session gamescope (Cemu TV + GamePad View).
+   *
+   * Game Mode kms unsets `$DISPLAY` so capture is not X11. `XOpenDisplay(nullptr)`
+   * then fails and GamePad inject becomes a no-op. Headless video/1 is `:2`.
+   *
+   * @return `":0"`.
+   */
+  [[nodiscard]] const char *session_x11_name();
+
+  /**
    * @brief Choose show vs hide from the current overlay atom.
    *
    * @param overlay_is_on True when `STEAM_OVERLAY=1` on Steam Big Picture.
