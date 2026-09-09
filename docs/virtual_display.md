@@ -125,6 +125,13 @@ the KWin helper. A static surface may emit only one PipeWire buffer; software
 encode must copy that CPU frame into `dummy_img()` and re-present it, or
 video/1 stays black.
 
+Hold-Select (`back_button_timeout`) pulses HOME on the libvirtualhid x360.
+That pad is UHID bluetooth, so Steam Game Mode ignores Guide. Sunshine then
+toggles `STEAM_OVERLAY` on Steam Big Picture plus `GAMESCOPE_FOCUSED_APP=769`.
+Display-index-1 touch is XSent to Cemu **GamePad View** on session gamescope
+(`:0`). Host uinput would hit the raised TV at the same `0,0`. Do not raise
+GamePad over TV (HDMI would show the pad).
+
 ## Behavior without a supported source
 
 When the feature is disabled or no configured source is available,

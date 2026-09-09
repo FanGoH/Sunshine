@@ -23,6 +23,9 @@
 // local includes
 #include "src/config.h"
 #include "src/logging.h"
+#ifdef __linux__
+  #include "src/platform/linux/gamescope_session.h"
+#endif
 #include "virtualhid_input.h"
 
 using namespace std::literals;
@@ -706,11 +709,17 @@ namespace platf::virtualhid {
     auto &gamepad = context.gamepads[nr];
     auto updated_state = make_gamepad_state(state, gamepad->adapter->support());
     const auto &cached_state = gamepad->adapter->state();
+    const bool guide_was = cached_state.buttons.test(lvh::GamepadButton::guide);
     updated_state.acceleration = cached_state.acceleration;
     updated_state.gyroscope = cached_state.gyroscope;
     updated_state.battery = cached_state.battery;
     updated_state.touchpad_contacts = cached_state.touchpad_contacts;
     log_failure("submit libvirtualhid gamepad state"sv, gamepad->adapter->set_state(updated_state));
+#ifdef __linux__
+    if (!guide_was && (state.buttonFlags & HOME)) {
+      gamescope_on_guide_press();
+    }
+#endif
   }
 
   void gamepad_touch(input_context_t &context, const gamepad_touch_t &touch) {
@@ -1082,6 +1091,15 @@ namespace platf {
   }
 
   void touch_update(client_input_t *input, const touch_port_t &touch_port, const touch_input_t &touch) {
+#ifdef __linux__
+    if (inject_gamepad_view_touch(touch_port, touch)) {
+      return;
+    }
+    if (gamescope::touch_is_second_display(touch.pointerId) && config::video.dual_display_source == "gamescope-virtual"sv) {
+      BOOST_LOG(debug) << "display-1 touch dropped: no GamePad View window"sv;
+      return;
+    }
+#endif
     virtualhid::touch_update(virtualhid::get_client_context(input), touch_port, touch);
   }
 
