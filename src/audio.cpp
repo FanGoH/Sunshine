@@ -184,16 +184,25 @@ namespace audio {
     }
 
     // Order of priority:
-    // 1. Virtual sink
-    // 2. Audio sink
-    // 3. Host
+    // 1. Configured audio_sink when it is a real device (not sink-sunshine-*)
+    // 2. Host default sink when it is a real device
+    // 3. Virtual sink only when the selected sink is missing or already virtual
+    //
+    // Game Mode Cemu (Cubeb) stays on "Virtual Surround Sound" / HDMI and
+    // never follows set-default-sink. Switching to sink-sunshine-stereo then
+    // captures a SUSPENDED monitor → "PulseAudio record stream not ready"
+    // and Moonlight is silent while the TV still plays.
     std::string *sink = &ref->sink.host;
     if (!config::audio.sink.empty()) {
       sink = &config::audio.sink;
     }
 
-    // Prefer the virtual sink if host playback is disabled or there's no other sink
-    if (ref->sink.null && (!config.flags[config_t::HOST_AUDIO] || sink->empty())) {
+    const bool selected_sink_usable =
+      !sink->empty() &&
+      sink->find("sink-sunshine-") == std::string::npos;
+
+    if (ref->sink.null && !selected_sink_usable &&
+        (!config.flags[config_t::HOST_AUDIO] || sink->empty())) {
       auto &null = *ref->sink.null;
       switch (stream.channelCount) {
         case 2:
@@ -206,6 +215,9 @@ namespace audio {
           sink = &null.surround71;
           break;
       }
+    } else if (selected_sink_usable) {
+      BOOST_LOG(info) << "Capturing host sink ["sv << *sink
+                      << "] instead of empty sunshine virtual"sv;
     }
 
     // Only the first to start a session may change the default sink

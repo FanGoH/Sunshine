@@ -70,11 +70,14 @@ namespace platf {
   /**
    * @brief PulseAudio recording stream and channel metadata.
    *
-   * Game Mode's null-sink monitor is often silent (Cemu plays to gamescope).
+   * Game Mode's null-sink monitor is often silent (Cemu Cubeb stays on
+   * Virtual Surround Sound / HDMI and never follows set-default-sink).
    * `pa_simple_read` and `pa_mainloop_poll` can block forever on that source,
    * so session::join never finishes, the control thread exits on app stop,
    * and Moonlight hits control establishment error / Initial Ping Timeout.
    * Drive Pulse with non-blocking `pa_mainloop_iterate` so shutdown is observed.
+   * Prefer capturing the host sink monitor (see audio.cpp) so the stream
+   * has audio instead of "PulseAudio record stream not ready".
    */
   struct mic_attr_t: public mic_t {
     std::unique_ptr<pa_mainloop, void (*)(pa_mainloop *)> loop {nullptr, pa_mainloop_free};
