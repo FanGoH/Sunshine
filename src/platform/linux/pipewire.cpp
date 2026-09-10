@@ -1670,16 +1670,11 @@ namespace pipewire {
         BOOST_LOG(error) << "[pipewire] Failed to ensure pipewire stream. capture() failed with error.";
         return platf::capture_e::error;
       }
-      {
-        const auto connect_deadline = std::chrono::steady_clock::now() + 3s;
-        while (pipewire.stream_state() == PW_STREAM_STATE_CONNECTING &&
-               std::chrono::steady_clock::now() < connect_deadline) {
-          std::this_thread::sleep_for(50ms);
-        }
-        if (pipewire.stream_state() == PW_STREAM_STATE_CONNECTING) {
-          BOOST_LOG(error) << "[pipewire] stream stayed connecting for 3s; failing the second display so Moonlight is not stuck on Starting Desktop"sv;
-          return platf::capture_e::error;
-        }
+      if (pipewire.stream_state() == PW_STREAM_STATE_CONNECTING) {
+        // Game Mode gamescope-virtual often stays connecting until the first
+        // buffer. Failing here made Moonlight report "second display ended"
+        // while HDMI was still live. Snapshot timeouts already re-present.
+        BOOST_LOG(warning) << "[pipewire] stream still connecting after ensure_stream; capturing anyway"sv;
       }
       sleep_overshoot_logger.reset();
 
