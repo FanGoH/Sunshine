@@ -150,6 +150,22 @@ namespace proc {
      * @brief Terminate the launched application process.
      */
     void terminate();
+    /**
+     * @brief True when the current app is the Desktop placebo (no child process).
+     */
+    [[nodiscard]] bool is_placebo() const;
+    /**
+     * @brief Close Desktop so the next Moonlight connect can `/launch`.
+     *
+     * No-op when a real app (Cemu Dual-Screen) is still running.
+     */
+    void terminate_if_placebo();
+#ifdef SUNSHINE_TESTS
+    /**
+     * @brief Arm a Desktop placebo without launching Moonlight (unit tests).
+     */
+    void test_arm_desktop_placebo(int app_id);
+#endif
 
   private:
     int _app_id;

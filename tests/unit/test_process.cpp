@@ -9,6 +9,9 @@
 #include <filesystem>
 #include <fstream>
 
+// lib includes
+#include <boost/process/v1.hpp>
+
 // local includes
 #include <src/process.h>
 
@@ -271,4 +274,23 @@ TEST_F(ProcessPNGTest, ValidateAppImagePath_OldSteamDefault) {
   // Test the special case for old steam image path
   const std::string result = proc::validate_app_image_path("./assets/steam.png");
   EXPECT_EQ(result, SUNSHINE_ASSETS_DIR "/steam.png");
+}
+
+TEST(DesktopPlacebo, LastClientClosesDesktopSoLaunchIsFree) {
+  boost::process::v1::environment env = boost::this_process::environment();
+  proc::proc_t p {std::move(env), {}};
+  p.test_arm_desktop_placebo(958645192);
+  EXPECT_TRUE(p.is_placebo());
+  EXPECT_EQ(p.running(), 958645192);
+  p.terminate_if_placebo();
+  EXPECT_FALSE(p.is_placebo());
+  EXPECT_EQ(p.running(), 0);
+}
+
+TEST(DesktopPlacebo, RealAppIsNotClosedAsDesktop) {
+  boost::process::v1::environment env = boost::this_process::environment();
+  proc::proc_t p {std::move(env), {}};
+  EXPECT_FALSE(p.is_placebo());
+  p.terminate_if_placebo();
+  EXPECT_EQ(p.running(), 0);
 }

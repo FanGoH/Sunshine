@@ -369,6 +369,27 @@ namespace proc {
     _app_id = -1;
   }
 
+  bool proc_t::is_placebo() const {
+    return placebo;
+  }
+
+  void proc_t::terminate_if_placebo() {
+    if (!placebo) {
+      return;
+    }
+    BOOST_LOG(info) << "Last Moonlight client gone; closing Desktop so the next connect can /launch"sv;
+    terminate();
+  }
+
+#ifdef SUNSHINE_TESTS
+  void proc_t::test_arm_desktop_placebo(int app_id) {
+    _app_id = app_id;
+    _app.name = "Desktop";
+    _app.cmd.clear();
+    placebo = true;
+  }
+#endif
+
   const std::vector<ctx_t> &proc_t::get_apps() const {
     return _apps;
   }

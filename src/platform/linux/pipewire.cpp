@@ -437,6 +437,10 @@ namespace pipewire {
       return stream_data.cpu_frame_valid;
     }
 
+    enum pw_stream_state stream_state() const {
+      return stream_data.pw_state;
+    }
+
     void release_current_buffer() {
       pw_thread_loop_lock(loop);
       {
@@ -1665,6 +1669,17 @@ namespace pipewire {
       if (pipewire.ensure_stream(mem_type, width, height, target_framerate, dmabuf_infos.data(), n_dmabuf_infos, display_is_nvidia) < 0) {
         BOOST_LOG(error) << "[pipewire] Failed to ensure pipewire stream. capture() failed with error.";
         return platf::capture_e::error;
+      }
+      {
+        const auto connect_deadline = std::chrono::steady_clock::now() + 3s;
+        while (pipewire.stream_state() == PW_STREAM_STATE_CONNECTING &&
+               std::chrono::steady_clock::now() < connect_deadline) {
+          std::this_thread::sleep_for(50ms);
+        }
+        if (pipewire.stream_state() == PW_STREAM_STATE_CONNECTING) {
+          BOOST_LOG(error) << "[pipewire] stream stayed connecting for 3s; failing the second display so Moonlight is not stuck on Starting Desktop"sv;
+          return platf::capture_e::error;
+        }
       }
       sleep_overshoot_logger.reset();
 

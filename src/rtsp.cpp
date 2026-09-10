@@ -16,8 +16,10 @@ extern "C" {
 #include <format>
 #include <limits>
 #include <set>
+#include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -30,6 +32,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "platform/common.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
@@ -720,17 +723,33 @@ namespace rtsp_stream {
      * @examples_end
      */
     void clear(bool all = true) {
-      auto lg = _session_slots.lock();
+      std::vector<std::shared_ptr<stream::session_t>> dying;
+      {
+        auto lg = _session_slots.lock();
 
-      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
+        for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+          auto &slot = *(*i);
+          if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
+            stream::session::stop(slot);
+            dying.push_back(*i);
+            i = _session_slots->erase(i);
+          } else {
+            i++;
+          }
+        }
+      }
 
-          i = _session_slots->erase(i);
+      // Join after dropping the slots lock so /launch, /resume, and
+      // session_count cannot block on Pulse/PipeWire teardown. Periodic
+      // cleanup joins in the background so rtsp::handler stays live.
+      for (auto &slot : dying) {
+        if (all) {
+          stream::session::join(*slot);
         } else {
-          i++;
+          std::thread([slot]() {
+            platf::set_thread_name("session::join");
+            stream::session::join(*slot);
+          }).detach();
         }
       }
     }
@@ -741,16 +760,25 @@ namespace rtsp_stream {
      * @param cert Certificate data or object used by the operation.
      */
     void clear_by_cert(std::string_view cert) {
-      auto lg = _session_slots.lock();
-      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (stream::session::client_cert(slot) == cert) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
-          i = _session_slots->erase(i);
-        } else {
-          i++;
+      std::vector<std::shared_ptr<stream::session_t>> dying;
+      {
+        auto lg = _session_slots.lock();
+        for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+          auto &slot = *(*i);
+          if (stream::session::client_cert(slot) == cert) {
+            stream::session::stop(slot);
+            dying.push_back(*i);
+            i = _session_slots->erase(i);
+          } else {
+            i++;
+          }
         }
+      }
+      for (auto &slot : dying) {
+        std::thread([slot]() {
+          platf::set_thread_name("session::join");
+          stream::session::join(*slot);
+        }).detach();
       }
     }
 
@@ -821,9 +849,9 @@ namespace rtsp_stream {
   }
 
   int session_count() {
-    // Ensure session_count is up-to-date
-    server.clear(false);
-
+    // Do not join STOPPING sessions here. /launch and /resume call this on the
+    // nvhttp thread; a blocking Pulse sample() used to freeze Starting Desktop
+    // with no new log lines.
     return server.session_count();
   }
 

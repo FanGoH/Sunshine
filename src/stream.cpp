@@ -2754,6 +2754,12 @@ namespace stream {
       if (session.mail) {
         session.mail->event<bool>(mail::video2_shutdown)->raise(true);
       }
+
+      // Close Desktop before join() so the next Moonlight tap can /launch even
+      // if Pulse sample() is still blocked. Cemu (real cmd) stays BUSY.
+      if (running_sessions.load(std::memory_order_acquire) <= 1) {
+        proc::proc.terminate_if_placebo();
+      }
     }
 
     /**
@@ -2812,6 +2818,7 @@ namespace stream {
         }
 
         platf::streaming_will_stop();
+        proc::proc.terminate_if_placebo();
       } else {
         // Another client is still streaming. Drop only this client's pads
         // so the remaining pad keeps its global slot. Do not revert the
