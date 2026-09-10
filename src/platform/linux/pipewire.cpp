@@ -575,24 +575,19 @@ namespace pipewire {
         // before pw_stream_new: setting it afterwards is a no-op (or UAF).
         const bool have_serial = SUNSHINE_USE_PIPEWIRE_OBJECT_SERIAL && (object_serial & SPA_ID_INVALID) != SPA_ID_INVALID;
         const bool have_node = node != PW_ID_ANY;
-        // gamescope-virtual Video/Source stays suspended until a consumer is
-        // linked. TARGET_OBJECT + AUTOCONNECT waits for WirePlumber to finish
-        // that link, so pw_stream_get_node_id stays invalid and
-        // ensure_capture_link never runs (video/1 = dummy_img() black).
-        // When we already have the producer node id, skip the target and
-        // AUTOCONNECT; link-factory creates the edge once our node exists.
-        const bool explicit_link = have_node;
+        // Game Mode checkpoint (119d7452): AUTOCONNECT + object.serial.
+        // Skipping those when a node id was present broke gamescope-virtual
+        // (sidecar always has a node). WirePlumber links by serial; link-factory
+        // is only a fallback after the consumer node exists.
         // PipeWire 1.4+ docs: TARGET_OBJECT must be object.serial or node.name.
-        // Passing a node id as target_id overwrites that property and WirePlumber
-        // looks up the wrong object, so the stream stays in "connecting".
-        if (have_serial && !explicit_link) {
+        if (have_serial) {
           pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%" PRIu64, object_serial);
         }
 
         BOOST_LOG(info) << "[pipewire] Create PW stream fd="sv << fd
                         << " node="sv << node
                         << " object_serial="sv << object_serial
-                        << " target="sv << (explicit_link ? "node-link"sv : (have_serial ? "serial"sv : "none"sv));
+                        << " target="sv << (have_serial ? "serial"sv : (have_node ? "node-link"sv : "none"sv));
         stream_data.stream = pw_stream_new(core, "Sunshine Video Capture", props);
         props = nullptr;
         stream_data.core = core;
@@ -635,18 +630,14 @@ namespace pipewire {
           n_params++;
         }
 
-        // PW_ID_ANY. Do not wait here: encoder probe and session start share
-        // this path, and a blocking wait made Moonlight connect stall.
-        const auto flags = explicit_link ?
-                             PW_STREAM_FLAG_MAP_BUFFERS :
-                             static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS);
-        BOOST_LOG(info) << "[pipewire] Connect PW stream "sv
-                        << (explicit_link ? "node-link node="sv : "PW_ID_ANY serial="sv)
-                        << (explicit_link ? static_cast<uint64_t>(node) : object_serial);
+        // PW_ID_ANY + TARGET_OBJECT (object.serial). Same as 119d7452.
+        // Do not wait here: encoder probe and session start share this path.
+        const auto flags = static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS);
+        BOOST_LOG(info) << "[pipewire] Connect PW stream PW_ID_ANY serial="sv << object_serial;
         result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, PW_ID_ANY, flags, params.data(), n_params);
         if (result < 0) {
           BOOST_LOG(error) << "[pipewire] pw_stream_connect failed: "sv << result << " ("sv << strerror(-result) << ")"sv;
-        } else if (explicit_link) {
+        } else {
           ensure_capture_link(&stream_data);
         }
       }
