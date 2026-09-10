@@ -134,6 +134,10 @@ namespace platf::gamescope {
     return display_index == 0 && primary_from_secondary;
   }
 
+  bool abs_targets_hdmi_surface(std::size_t display_index, bool primary_from_secondary) {
+    return display_index == 0 && !primary_from_secondary;
+  }
+
 }  // namespace platf::gamescope
 
 #ifdef SUNSHINE_BUILD_X11
@@ -144,7 +148,13 @@ namespace {
   Display *cached_touch[2] = {nullptr, nullptr};  ///< Reused connections for `:1` then `:0`.
   Display *cached_pad_dpy = nullptr;  ///< Display that owns `cached_pad`.
   Window cached_pad = None;  ///< Last GamePad View / Azahar Secondary xid.
+  Display *cached_hdmi_dpy = nullptr;  ///< Display that owns `cached_hdmi`.
+  Window cached_hdmi = None;  ///< Last Cemu TV / Azahar Primary xid.
+  int last_hdmi_x = 0;  ///< Last TV-local pointer X (for mouse-button packets).
+  int last_hdmi_y = 0;  ///< Last TV-local pointer Y (for mouse-button packets).
+  bool last_hdmi_xy_valid = false;  ///< True after at least one display-0 motion.
   bool pad_pointer_down = false;  ///< True while display-1 contact is held on GamePad View.
+  bool hdmi_pointer_down = false;  ///< True while display-0 contact is held on Cemu TV.
   int last_pad_x = 0;  ///< Last GamePad-local pointer X (for mouse-button packets).
   int last_pad_y = 0;  ///< Last GamePad-local pointer Y (for mouse-button packets).
   bool last_pad_xy_valid = false;  ///< True after at least one display-1 motion.
@@ -541,6 +551,63 @@ namespace {
   }
 
   /**
+   * @brief Return Cemu TV or Azahar Primary Window, refreshing a stale cache.
+   *
+   * @param dpy X11 display.
+   * @return Window id, or `None`.
+   */
+  Window hdmi_surface_window(Display *dpy) {
+    if (cached_hdmi != None && cached_hdmi_dpy == dpy) {
+      XWindowAttributes attr {};
+      if (XGetWindowAttributes(dpy, cached_hdmi, &attr) && attr.width > 0 && attr.height > 0) {
+        const auto title = window_title(dpy, cached_hdmi);
+        if (platf::gamescope::title_is_hdmi_surface(title)) {
+          return cached_hdmi;
+        }
+      }
+      cached_hdmi = None;
+      cached_hdmi_dpy = nullptr;
+    }
+    cached_hdmi = find_window(dpy, platf::gamescope::title_is_hdmi_surface);
+    cached_hdmi_dpy = cached_hdmi != None ? dpy : nullptr;
+    return cached_hdmi;
+  }
+
+  /**
+   * @brief Session Xwayland that currently has Cemu TV / Azahar Primary.
+   *
+   * Prefers `:1` (`FOCUS_DISPLAY=1`), then `:0`. Never `:2`.
+   *
+   * @return Display pointer, or `nullptr` when neither Xwayland has the TV.
+   */
+  Display *x11_hdmi_display() {
+    if (cached_hdmi_dpy && cached_hdmi != None) {
+      if (hdmi_surface_window(cached_hdmi_dpy) != None) {
+        return cached_hdmi_dpy;
+      }
+    }
+
+    const auto count = platf::gamescope::session_x11_touch_count();
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto *name = platf::gamescope::session_x11_touch_name(i);
+      auto *dpy = x11_open(name);
+      if (!dpy) {
+        continue;
+      }
+      if (hdmi_surface_window(dpy) != None) {
+        BOOST_LOG(info) << "HDMI inject: using "sv << DisplayString(dpy);
+        return dpy;
+      }
+    }
+    static bool logged_missing = false;
+    if (!logged_missing) {
+      BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Azahar Primary Window on :1 or :0"sv;
+      logged_missing = true;
+    }
+    return nullptr;
+  }
+
+  /**
    * @brief Translate window-local coordinates to root coordinates.
    *
    * @param dpy X11 display.
@@ -730,6 +797,71 @@ namespace {
   }
 
   /**
+   * @brief Log the first few HDMI pointer events with mapped pixels.
+   *
+   * @param kind Short label (`abs`, `button`).
+   * @param nx Unit X before clamp.
+   * @param ny Unit Y before clamp.
+   * @param x Window-local X.
+   * @param y Window-local Y.
+   * @param window Target xid.
+   * @param width Target width.
+   * @param height Target height.
+   */
+  void log_hdmi_pointer(std::string_view kind, float nx, float ny, int x, int y, Window window, int width, int height) {
+    static int remaining = 12;
+    if (remaining <= 0) {
+      return;
+    }
+    --remaining;
+    BOOST_LOG(info) << "HDMI "sv << kind << " unit="sv << nx << ',' << ny
+                    << " px="sv << x << ',' << y
+                    << " xid="sv << window << ' ' << width << 'x' << height;
+  }
+
+  /**
+   * @brief Resolve Cemu TV, map unit coords, and send a pointer event.
+   *
+   * Same delivery as GamePad inject (`XWarpPointer` + `XSendEvent` mask 0).
+   * Host uinput does not reach wx/GTK on session `:1`.
+   *
+   * @param dpy X11 display.
+   * @param nx Unit X in `[0, 1]`.
+   * @param ny Unit Y in `[0, 1]`.
+   * @param kind Log label.
+   * @param type `ButtonPress`, `ButtonRelease`, or `MotionNotify`.
+   * @param state Modifier / button mask.
+   * @param button Button number, or `0` for motion.
+   * @return True when the HDMI surface exists and the event was flushed.
+   */
+  bool inject_hdmi_unit(Display *dpy, float nx, float ny, std::string_view kind, int type, unsigned int state, unsigned int button) {
+    const auto tv = hdmi_surface_window(dpy);
+    if (tv == None) {
+      static bool logged_missing = false;
+      if (!logged_missing) {
+        BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Azahar Primary Window on this Xwayland"sv;
+        logged_missing = true;
+      }
+      return false;
+    }
+    const auto target = gamepad_input_window(dpy, tv);
+
+    XWindowAttributes attr {};
+    if (!XGetWindowAttributes(dpy, target, &attr) || attr.width <= 0 || attr.height <= 0) {
+      return false;
+    }
+
+    const auto [x, y] = platf::gamescope::touch_to_window_xy(nx, ny, attr.width, attr.height);
+    last_hdmi_x = x;
+    last_hdmi_y = y;
+    last_hdmi_xy_valid = true;
+    log_hdmi_pointer(kind, nx, ny, x, y, target, attr.width, attr.height);
+    send_pointer(dpy, target, type, x, y, state, button);
+    XFlush(dpy);
+    return true;
+  }
+
+  /**
    * @brief Moonlight mouse button to X11 button number.
    *
    * @param button Moonlight `BUTTON_*` (`1` left, `2` middle, `3` right).
@@ -874,6 +1006,69 @@ namespace platf {
     const unsigned int state = release ? Button1Mask : 0;
     send_pointer(dpy, target, type, last_pad_x, last_pad_y, state, x_button);
     pad_pointer_down = !release && x_button == Button1;
+    XFlush(dpy);
+    return true;
+#else
+    (void) button;
+    (void) release;
+    return false;
+#endif
+  }
+
+  bool inject_hdmi_surface_abs_mouse(const touch_port_t &touch_port, float x, float y) {
+#ifdef SUNSHINE_BUILD_X11
+    std::scoped_lock lock {x11_lock};
+    auto *dpy = x11_hdmi_display();
+    if (!dpy) {
+      return false;
+    }
+    const auto [nx, ny] = platf::gamescope::abs_to_unit(
+      x,
+      y,
+      touch_port.offset_x,
+      touch_port.offset_y,
+      touch_port.width,
+      touch_port.height
+    );
+    return inject_hdmi_unit(dpy, nx, ny, "abs"sv, MotionNotify, hdmi_pointer_down ? Button1Mask : 0, 0);
+#else
+    (void) touch_port;
+    (void) x;
+    (void) y;
+    return false;
+#endif
+  }
+
+  bool inject_hdmi_surface_button(int button, bool release) {
+#ifdef SUNSHINE_BUILD_X11
+    const auto x_button = x11_button(button);
+    if (x_button == 0) {
+      return false;
+    }
+
+    std::scoped_lock lock {x11_lock};
+    auto *dpy = x11_hdmi_display();
+    if (!dpy || !last_hdmi_xy_valid) {
+      return false;
+    }
+
+    const auto tv = hdmi_surface_window(dpy);
+    if (tv == None) {
+      return false;
+    }
+    const auto target = gamepad_input_window(dpy, tv);
+    XWindowAttributes attr {};
+    if (!XGetWindowAttributes(dpy, target, &attr) || attr.width <= 0 || attr.height <= 0) {
+      return false;
+    }
+
+    const auto nx = attr.width > 1 ? static_cast<float>(last_hdmi_x) / static_cast<float>(attr.width - 1) : 0.0F;
+    const auto ny = attr.height > 1 ? static_cast<float>(last_hdmi_y) / static_cast<float>(attr.height - 1) : 0.0F;
+    log_hdmi_pointer(release ? "button-up"sv : "button-down"sv, nx, ny, last_hdmi_x, last_hdmi_y, target, attr.width, attr.height);
+    const auto type = release ? ButtonRelease : ButtonPress;
+    const unsigned int state = release ? Button1Mask : 0;
+    send_pointer(dpy, target, type, last_hdmi_x, last_hdmi_y, state, x_button);
+    hdmi_pointer_down = !release && x_button == Button1;
     XFlush(dpy);
     return true;
 #else

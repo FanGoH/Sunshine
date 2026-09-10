@@ -184,6 +184,19 @@ namespace platf::gamescope {
    */
   [[nodiscard]] bool abs_targets_gamepad_view(std::size_t display_index, bool primary_from_secondary);
 
+  /**
+   * @brief True when Game Mode should warp this absolute mouse onto Cemu TV.
+   *
+   * Dual-stream HDMI / Thor top is display 0. Do not take this path for
+   * Odin **GamePad only** (`primary_from_secondary`) — that display 0 is
+   * the touch surface. Display 1 stays on GamePad View.
+   *
+   * @param display_index Zero-based Moonlight display index.
+   * @param primary_from_secondary True when video/0 captures the GamePad display.
+   * @return True when HDMI/TV inject should own this packet.
+   */
+  [[nodiscard]] bool abs_targets_hdmi_surface(std::size_t display_index, bool primary_from_secondary);
+
 }  // namespace platf::gamescope
 
 namespace platf {
@@ -236,5 +249,28 @@ namespace platf {
    * @return True when the touch surface received the button event.
    */
   bool inject_gamepad_view_button(int button, bool release);
+
+  /**
+   * @brief Move the Cemu TV / Azahar Primary pointer from a display-0 abs mouse packet.
+   *
+   * Host uinput does not reach wx/GTK on session `:1`. Display 1 already warps
+   * GamePad View; display 0 needs the same for the HDMI surface. Do not use
+   * this for GamePad-only (`primary_from_secondary`).
+   *
+   * @param touch_port Display-0 touch port (`offset` + env size in pixels).
+   * @param x Desktop-space X from `client_to_touchport`.
+   * @param y Desktop-space Y from `client_to_touchport`.
+   * @return True when the HDMI surface received the motion.
+   */
+  bool inject_hdmi_surface_abs_mouse(const touch_port_t &touch_port, float x, float y);
+
+  /**
+   * @brief Click Cemu TV / Azahar Primary after a display-0 abs mouse move.
+   *
+   * @param button Moonlight mouse button (`BUTTON_LEFT` is `1`, same as X11).
+   * @param release True for button-up.
+   * @return True when the HDMI surface received the button event.
+   */
+  bool inject_hdmi_surface_button(int button, bool release);
 
 }  // namespace platf

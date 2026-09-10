@@ -929,17 +929,22 @@ namespace input {
       static_cast<void>(platf::inject_gamepad_view_abs_mouse(abs_port, tpcoords->first, tpcoords->second));
       return;
     }
+    if (config::video.dual_display_source == "gamescope-virtual"sv &&
+        platf::gamescope::abs_targets_hdmi_surface(input->last_abs_display, input->primary_from_secondary)) {
+      static_cast<void>(platf::inject_hdmi_surface_abs_mouse(abs_port, tpcoords->first, tpcoords->second));
+      return;
+    }
 #endif
 
     platf::abs_mouse(platf_input, abs_port, tpcoords->first, tpcoords->second);
   }
 
   /**
-   * @brief Emit a mouse button, diverting display-1 clicks to GamePad View.
+   * @brief Emit a mouse button, diverting Game Mode clicks to the right window.
    *
-   * Mouse-button packets have no display index. Game Mode GamePad taps are
-   * absolute mouse on display 1, then a bare left-click. Without this, the
-   * click lands on the raised Cemu TV at the last gamescope cursor (center).
+   * Mouse-button packets have no display index. Game Mode taps are absolute
+   * mouse (display 1 = GamePad View, display 0 = Cemu TV) then a bare
+   * left-click. Host uinput does not reach wx/GTK on session `:1`.
    *
    * @param input Stream input that tracks the last absolute-mouse display.
    * @param button Moonlight mouse button.
@@ -952,6 +957,9 @@ namespace input {
       // Warp + XSendEvent first. wx/GTK often ignores send_event, so still emit
       // a real uinput click at the warped cursor (stacked TV/GamePad share it).
       static_cast<void>(platf::inject_gamepad_view_button(button, release));
+    } else if (config::video.dual_display_source == "gamescope-virtual"sv &&
+               platf::gamescope::abs_targets_hdmi_surface(input->last_abs_display, input->primary_from_secondary)) {
+      static_cast<void>(platf::inject_hdmi_surface_button(button, release));
     }
 #endif
     platf::button_mouse(platf_input, button, release);
@@ -2339,6 +2347,7 @@ namespace input {
       if (mouse_press[button]) {
 #ifdef __linux__
         static_cast<void>(platf::inject_gamepad_view_button(button, true));
+        static_cast<void>(platf::inject_hdmi_surface_button(button, true));
 #endif
         platf::button_mouse(platf_input, button, true);
         mouse_press[button] = false;

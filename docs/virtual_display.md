@@ -144,8 +144,11 @@ mouse-button packet still goes to host uinput at that warped cursor — wx/GTK
 often ignore synthetic `send_event`. Host uinput abs-move on display 1 is
 skipped (wrong coordinate space). Odin **GamePad only** is display 0 with
 `x-ml-video[0].source=secondary` (`primary_from_secondary`); HDMI/TV taps stay
-display 0 without that flag. Checkpoint
-`checkpoint-2026-09-09-gamemode-cemu-touch-v2`. Do not raise GamePad over TV.
+display 0 without that flag and take the same warp/`XSendEvent` path onto
+Cemu TV / Azahar **Primary Window** (`:1` then `:0`). Host uinput abs-move
+on display 0 is skipped for the same `:1` wx/GTK reason. GamePad-only must
+not take the HDMI path. Checkpoint
+`checkpoint-2026-09-10-gamemode-gamepad-touch`. Do not raise GamePad over TV.
 
 ## Behavior without a supported source
 

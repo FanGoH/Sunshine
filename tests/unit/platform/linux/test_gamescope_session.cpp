@@ -108,4 +108,11 @@ TEST(GamescopeSessionTest, AbsTargetsGamepadViewForDualStreamAndGamepadOnly) {
   EXPECT_FALSE(platf::gamescope::abs_targets_gamepad_view(0, false));
 }
 
+TEST(GamescopeSessionTest, AbsTargetsHdmiSurfaceOnlyOnDisplay0WithoutOdinHack) {
+  EXPECT_TRUE(platf::gamescope::abs_targets_hdmi_surface(0, false));
+  EXPECT_FALSE(platf::gamescope::abs_targets_hdmi_surface(0, true));
+  EXPECT_FALSE(platf::gamescope::abs_targets_hdmi_surface(1, false));
+  EXPECT_FALSE(platf::gamescope::abs_targets_hdmi_surface(1, true));
+}
+
 #endif
