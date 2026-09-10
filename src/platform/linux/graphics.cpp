@@ -661,7 +661,14 @@ namespace egl {
 
     gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
 
-    gl_drain_errors;
+    GLenum err = gl::ctx.GetError();
+    if (err != GL_NO_ERROR) {
+      BOOST_LOG(error) << "Couldn't bind RGB DMA-BUF as a texture: "sv << util::hex(err).to_string_view()
+                       << " (need a current EGL context on this thread)"sv;
+      while ((err = gl::ctx.GetError()) != GL_NO_ERROR) {
+      }
+      return std::nullopt;
+    }
 
     return rgb;
   }

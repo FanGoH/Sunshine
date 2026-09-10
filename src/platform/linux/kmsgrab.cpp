@@ -1711,7 +1711,9 @@ namespace platf {
         auto rgb_opt = egl::import_source(display.get(), sd);
 
         if (!rgb_opt) {
-          return capture_e::error;
+          // Do not reinit kmsgrab here: a new GBM/EGL context is what made HDMI
+          // black after Moonlight reconnect. Skip the frame and keep this context.
+          return capture_e::timeout;
         }
 
         auto &rgb = *rgb_opt;
@@ -1727,8 +1729,8 @@ namespace platf {
 
         if (w <= 0 || h <= 0) {
           BOOST_LOG(error) << "[kmsgrab] imported DMA-BUF texture is "sv << w << "x"sv << h
-                           << "; EGL context is unbound or the FB import failed"sv;
-          return capture_e::reinit;
+                           << "; skipping frame, keeping EGL context"sv;
+          return capture_e::timeout;
         }
 
         if (!pull_free_image_cb(img_out)) {
