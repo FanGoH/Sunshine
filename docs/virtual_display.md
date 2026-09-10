@@ -133,9 +133,11 @@ Display-index-1 finger taps from Fangoh Moonlight are **absolute mouse**
 (`sendMousePositionOnDisplay(..., displayIndex=1)` plus a later button packet
 with no display index). Native `LiSendTouchEvent` is compiled out. Sunshine
 maps those packets onto Cemu **GamePad View** or Azahar **Secondary Window**
-on session gamescope (`:0`):
-normalize desktop pixels, `XOpenDisplay(":0")` (kms unsets `$DISPLAY`, so
-`XOpenDisplay(nullptr)` was a silent no-op), `XWarpPointer` so `XQueryPointer`
+on session gamescope (`:1` first, then `:0`; never headless `:2`):
+normalize desktop pixels, `XOpenDisplay(":1")` when Cemu used `FOCUS_DISPLAY=1`
+(Steam Big Picture stays on `:0`; kms unsets `$DISPLAY`, so
+`XOpenDisplay(nullptr)` was a silent no-op and `:0`-only missed GamePad View),
+`XWarpPointer` so `XQueryPointer`
 matches, then `XSendEvent` mask `0` to the GamePad / Azahar GL child. Overlay
 hide restores Cemu TV or Azahar **Primary Window**. The following
 mouse-button packet still goes to host uinput at that warped cursor — wx/GTK

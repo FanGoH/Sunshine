@@ -105,14 +105,34 @@ namespace platf::gamescope {
   [[nodiscard]] std::pair<float, float> abs_to_unit(float x, float y, int offset_x, int offset_y, int width, int height);
 
   /**
-   * @brief X11 display name for session gamescope (HDMI + touch surfaces).
+   * @brief X11 display name for Steam Big Picture / overlay atoms.
    *
-   * Game Mode kms unsets `$DISPLAY` so capture is not X11. `XOpenDisplay(nullptr)`
-   * then fails and GamePad inject becomes a no-op. Headless video/1 is `:2`.
+   * Session gamescope `--xwayland-count 2` keeps Steam on `:0`. Cemu uses
+   * `FOCUS_DISPLAY=1` and lives on `:1`. kms unsets `$DISPLAY`;
+   * `XOpenDisplay(nullptr)` then fails. Headless video/1 is `:2` — never
+   * open that for inject or overlay.
    *
    * @return `":0"`.
    */
   [[nodiscard]] const char *session_x11_name();
+
+  /**
+   * @brief How many session Xwaylands may host GamePad View / Cemu TV.
+   *
+   * @return 2 (`:1` then `:0`). Does not include headless `:2`.
+   */
+  [[nodiscard]] std::size_t session_x11_touch_count();
+
+  /**
+   * @brief Session Xwayland that may host GamePad View, preferred first.
+   *
+   * Index 0 is `:1` (`FOCUS_DISPLAY=1`). Index 1 is `:0` (older Cemu-on-Steam
+   * Xwayland). Out of range returns `nullptr`.
+   *
+   * @param index Zero-based candidate.
+   * @return Display name, or `nullptr`.
+   */
+  [[nodiscard]] const char *session_x11_touch_name(std::size_t index);
 
   /**
    * @brief Choose show vs hide from the current overlay atom.
@@ -182,7 +202,8 @@ namespace platf {
   /**
    * @brief Send a display-1 touch to the GamePad / Azahar bottom window.
    *
-   * Game Mode keeps HDMI and the touch surface stacked at `:0` `0,0`. Host
+   * Game Mode keeps HDMI and the touch surface stacked at session `:1` `0,0`
+   * (Steam stays on `:0`). Host
    * uinput hits the raised TV / Primary Window. XSendEvent targets GamePad
    * View or Azahar Secondary Window without raising it.
    *

@@ -6,8 +6,10 @@
 // standard includes
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -82,6 +84,23 @@ namespace platf::gamescope {
     return ":0";
   }
 
+  std::size_t session_x11_touch_count() {
+    return 2;
+  }
+
+  const char *session_x11_touch_name(std::size_t index) {
+    // Prefer :1 — cemu-gamescope-focus.sh sets FOCUS_DISPLAY=1. :0 is Steam.
+    // Never :2 (headless video/1). Never $DISPLAY (kms unsets it).
+    switch (index) {
+      case 0:
+        return ":1";
+      case 1:
+        return ":0";
+      default:
+        return nullptr;
+    }
+  }
+
   overlay_action_e overlay_toggle_action(bool overlay_is_on) {
     return overlay_is_on ? overlay_action_e::hide : overlay_action_e::show;
   }
@@ -120,8 +139,10 @@ namespace platf::gamescope {
 #ifdef SUNSHINE_BUILD_X11
 namespace {
 
-  std::mutex x11_lock;  ///< Serializes Xlib calls on the cached display.
-  Display *cached_display = nullptr;  ///< Reused X11 connection for `:0` gamescope.
+  std::mutex x11_lock;  ///< Serializes Xlib calls on the cached displays.
+  Display *cached_overlay = nullptr;  ///< Reused X11 connection for Steam `:0`.
+  Display *cached_touch[2] = {nullptr, nullptr};  ///< Reused connections for `:1` then `:0`.
+  Display *cached_pad_dpy = nullptr;  ///< Display that owns `cached_pad`.
   Window cached_pad = None;  ///< Last GamePad View / Azahar Secondary xid.
   bool pad_pointer_down = false;  ///< True while display-1 contact is held on GamePad View.
   int last_pad_x = 0;  ///< Last GamePad-local pointer X (for mouse-button packets).
@@ -148,24 +169,53 @@ namespace {
   }
 
   /**
-   * @brief Return a cached X11 display, opening it on first use.
+   * @brief Open one session Xwayland and cache it.
    *
-   * @return Display pointer, or `nullptr` when `$DISPLAY` cannot be opened.
+   * @param name `:0` or `:1`. Never `$DISPLAY` or `:2`.
+   * @return Display pointer, or `nullptr` when the server is down.
    */
-  Display *x11_display() {
-    if (cached_display) {
-      return cached_display;
-    }
-    XInitThreads();
-    // Do not use `$DISPLAY`. kms unsets it; a leftover `:2` is headless gamescope.
-    cached_display = XOpenDisplay(platf::gamescope::session_x11_name());
-    if (!cached_display) {
-      BOOST_LOG(warning) << "gamescope session: XOpenDisplay "sv << platf::gamescope::session_x11_name() << " failed"sv;
+  Display *x11_open(const char *name) {
+    if (!name) {
       return nullptr;
     }
-    BOOST_LOG(info) << "gamescope session: XOpenDisplay "sv << DisplayString(cached_display);
-    previous_x11_error = XSetErrorHandler(ignore_stale_window);
-    return cached_display;
+    if (std::strcmp(name, platf::gamescope::session_x11_name()) == 0 && cached_overlay) {
+      return cached_overlay;
+    }
+    const auto count = platf::gamescope::session_x11_touch_count();
+    for (std::size_t i = 0; i < count; ++i) {
+      if (platf::gamescope::session_x11_touch_name(i) && std::strcmp(name, platf::gamescope::session_x11_touch_name(i)) == 0 && cached_touch[i]) {
+        return cached_touch[i];
+      }
+    }
+
+    XInitThreads();
+    auto *dpy = XOpenDisplay(name);
+    if (!dpy) {
+      BOOST_LOG(warning) << "gamescope session: XOpenDisplay "sv << name << " failed"sv;
+      return nullptr;
+    }
+    BOOST_LOG(info) << "gamescope session: XOpenDisplay "sv << DisplayString(dpy);
+    if (!previous_x11_error) {
+      previous_x11_error = XSetErrorHandler(ignore_stale_window);
+    }
+    if (std::strcmp(name, platf::gamescope::session_x11_name()) == 0) {
+      cached_overlay = dpy;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+      if (platf::gamescope::session_x11_touch_name(i) && std::strcmp(name, platf::gamescope::session_x11_touch_name(i)) == 0) {
+        cached_touch[i] = dpy;
+      }
+    }
+    return dpy;
+  }
+
+  /**
+   * @brief Steam / overlay X11 connection (`:0`).
+   *
+   * @return Display pointer, or `nullptr`.
+   */
+  Display *x11_display() {
+    return x11_open(platf::gamescope::session_x11_name());
   }
 
   /**
@@ -440,7 +490,7 @@ namespace {
    * @return Window id, or `None`.
    */
   Window gamepad_view_window(Display *dpy) {
-    if (cached_pad != None) {
+    if (cached_pad != None && cached_pad_dpy == dpy) {
       XWindowAttributes attr {};
       if (XGetWindowAttributes(dpy, cached_pad, &attr) && attr.width > 0 && attr.height > 0) {
         const auto title = window_title(dpy, cached_pad);
@@ -449,9 +499,45 @@ namespace {
         }
       }
       cached_pad = None;
+      cached_pad_dpy = nullptr;
     }
     cached_pad = find_window(dpy, platf::gamescope::title_is_touch_surface);
+    cached_pad_dpy = cached_pad != None ? dpy : nullptr;
     return cached_pad;
+  }
+
+  /**
+   * @brief Session Xwayland that currently has GamePad View / Azahar Secondary.
+   *
+   * Prefers `:1` (`FOCUS_DISPLAY=1`), then `:0`. Never `:2`.
+   *
+   * @return Display pointer, or `nullptr` when neither Xwayland has a pad.
+   */
+  Display *x11_touch_display() {
+    if (cached_pad_dpy && cached_pad != None) {
+      if (gamepad_view_window(cached_pad_dpy) != None) {
+        return cached_pad_dpy;
+      }
+    }
+
+    const auto count = platf::gamescope::session_x11_touch_count();
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto *name = platf::gamescope::session_x11_touch_name(i);
+      auto *dpy = x11_open(name);
+      if (!dpy) {
+        continue;
+      }
+      if (gamepad_view_window(dpy) != None) {
+        BOOST_LOG(info) << "GamePad inject: using "sv << DisplayString(dpy);
+        return dpy;
+      }
+    }
+    static bool logged_missing = false;
+    if (!logged_missing) {
+      BOOST_LOG(warning) << "GamePad inject: no GamePad View / Azahar Secondary Window on :1 or :0"sv;
+      logged_missing = true;
+    }
+    return nullptr;
   }
 
   /**
@@ -621,7 +707,7 @@ namespace {
     if (pad == None) {
       static bool logged_missing = false;
       if (!logged_missing) {
-        BOOST_LOG(warning) << "GamePad inject: no GamePad View / Azahar Secondary Window on "sv << platf::gamescope::session_x11_name();
+        BOOST_LOG(warning) << "GamePad inject: no GamePad View / Azahar Secondary Window on this Xwayland"sv;
         logged_missing = true;
       }
       return false;
@@ -697,7 +783,7 @@ namespace platf {
     }
 
     std::scoped_lock lock {x11_lock};
-    auto *dpy = x11_display();
+    auto *dpy = x11_touch_display();
     if (!dpy) {
       return false;
     }
@@ -737,7 +823,7 @@ namespace platf {
   bool inject_gamepad_view_abs_mouse(const touch_port_t &touch_port, float x, float y) {
 #ifdef SUNSHINE_BUILD_X11
     std::scoped_lock lock {x11_lock};
-    auto *dpy = x11_display();
+    auto *dpy = x11_touch_display();
     if (!dpy) {
       return false;
     }
@@ -766,7 +852,7 @@ namespace platf {
     }
 
     std::scoped_lock lock {x11_lock};
-    auto *dpy = x11_display();
+    auto *dpy = x11_touch_display();
     if (!dpy || !last_pad_xy_valid) {
       return false;
     }

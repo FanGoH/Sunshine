@@ -88,6 +88,13 @@ TEST(GamescopeSessionTest, SessionX11IsGamescopeZero) {
   EXPECT_STREQ(platf::gamescope::session_x11_name(), ":0");
 }
 
+TEST(GamescopeSessionTest, SessionX11TouchPrefersFocusDisplayOne) {
+  EXPECT_EQ(platf::gamescope::session_x11_touch_count(), 2U);
+  EXPECT_STREQ(platf::gamescope::session_x11_touch_name(0), ":1");
+  EXPECT_STREQ(platf::gamescope::session_x11_touch_name(1), ":0");
+  EXPECT_EQ(platf::gamescope::session_x11_touch_name(2), nullptr);
+}
+
 TEST(GamescopeSessionTest, DetectsSecondDisplayPointerBit) {
   EXPECT_FALSE(platf::gamescope::touch_is_second_display(3));
   EXPECT_TRUE(platf::gamescope::touch_is_second_display(3U | platf::gamescope::TOUCH_SECOND_DISPLAY_POINTER));
