@@ -1725,6 +1725,12 @@ namespace platf {
         gl::ctx.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
         BOOST_LOG(debug) << "width and height: w "sv << w << " h "sv << h;
 
+        if (w <= 0 || h <= 0) {
+          BOOST_LOG(error) << "[kmsgrab] imported DMA-BUF texture is "sv << w << "x"sv << h
+                           << "; EGL context is unbound or the FB import failed"sv;
+          return capture_e::reinit;
+        }
+
         if (!pull_free_image_cb(img_out)) {
           return platf::capture_e::interrupted;
         }
@@ -1779,9 +1785,8 @@ namespace platf {
         gl::ctx.DeleteTextures(1, &dst_tex);
         gl::ctx.DeleteVertexArrays(1, &vao);
 
-        static std::atomic<int> copies {0};
-        const int n = copies.fetch_add(1);
-        if (n < 8) {
+        if (copy_logs < 8) {
+          ++copy_logs;
           size_t nonzero = 0;
           const auto nbytes = static_cast<size_t>(height) * static_cast<size_t>(img_out->row_pitch);
           for (size_t i = 0; i < nbytes; ++i) {
@@ -1832,6 +1837,7 @@ namespace platf {
       egl::ctx_t ctx;  ///< EGL context used to copy KMS frames into RAM.
       std::optional<gl::program_t> download_prog;  ///< DCC sample program for this EGL context.
       bool download_failed = false;  ///< True when shader compile/link failed for this context.
+      int copy_logs = 0;  ///< DMA-BUF copy breadcrumbs remaining for this display.
     };
 
     /**

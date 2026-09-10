@@ -1747,10 +1747,28 @@ namespace video {
           return false;
         }
 
+        // Last Moonlight client left. Keep kmsgrab/EGL instead of tearing the
+        // capture thread down — a new thread's GBM context is what made HDMI
+        // black after reconnect (GL_INVALID_VALUE on DMA-BUF import).
+        if (capture_ctxs.empty()) {
+          BOOST_LOG(info) << "HDMI capture idle; waiting for the next Moonlight session"sv;
+          auto next = capture_ctx_queue->pop();
+          if (!next) {
+            return false;
+          }
+          capture_ctxs.emplace_back(std::move(*next));
+          BOOST_LOG(info) << "HDMI capture resumed for a new Moonlight session"sv;
+        }
+
         return true;
       };
 
       auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
+
+      if (status == platf::capture_e::error) {
+        BOOST_LOG(error) << "HDMI capture error; reinitializing instead of ending the capture thread"sv;
+        status = platf::capture_e::reinit;
+      }
 
       if (artificial_reinit && status != platf::capture_e::error) {
         status = platf::capture_e::reinit;
@@ -1804,15 +1822,14 @@ namespace video {
             }
 
             if (capture_ctxs.empty() && !capture_ctx_queue->peek()) {
-              BOOST_LOG(info) << "Skipping capture reinit; no active encode sessions"sv;
-              disp.reset();
-              display_wp = disp;
+              BOOST_LOG(info) << "HDMI capture idle during reinit; keeping kmsgrab for the next session"sv;
               reinit_event.reset();
               auto next_capture_ctx = capture_ctx_queue->pop();
               if (!next_capture_ctx) {
                 return;
               }
               capture_ctxs.emplace_back(std::move(*next_capture_ctx));
+              BOOST_LOG(info) << "HDMI capture resumed for a new Moonlight session"sv;
             }
 
             while (capture_ctx_queue->running()) {
@@ -1843,11 +1860,15 @@ namespace video {
             reinit_event.reset();
             continue;
           }
-        case platf::capture_e::error:
         case platf::capture_e::ok:
         case platf::capture_e::timeout:
         case platf::capture_e::interrupted:
-          return;
+          if (!capture_ctx_queue->running()) {
+            return;
+          }
+          BOOST_LOG(warning) << "HDMI capture returned ["sv << std::to_underlying(status)
+                             << "]; continuing so Moonlight can reconnect"sv;
+          continue;
         default:
           BOOST_LOG(error) << "Unrecognized capture status ["sv << std::to_underlying(status) << ']';
           return;
@@ -3001,6 +3022,20 @@ namespace video {
       images->stop();
       shutdown_event->raise(true);
     });
+
+    // Pin HDMI kmsgrab across the last client leaving. GamePad already does this
+    // via capture_thread_sync2; without the pin, end_capture_async joins the
+    // thread and the next session builds a dead EGL context.
+    static auto hdmi_keep = [] {
+      auto keep = capture_thread_async.ref();
+      if (keep) {
+        BOOST_LOG(info) << "Keeping HDMI capture thread alive across Moonlight reconnects"sv;
+      }
+      return keep;
+    }();
+    if (!hdmi_keep) {
+      BOOST_LOG(error) << "Failed to pin HDMI capture thread across reconnects"sv;
+    }
 
     auto ref = capture_thread_async.ref();
     if (!ref) {
