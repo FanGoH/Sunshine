@@ -232,18 +232,39 @@ namespace platf {
       .fragsize = uint32_t(frame_size * channels * sizeof(float))
     };
 
-    const auto flags = static_cast<pa_stream_flags_t>(PA_STREAM_ADJUST_LATENCY | PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND);
+    // Game Mode HDMI / VSS monitors are often SUSPENDED until something plays
+    // (Steam menu clicks are idle; Cemu Cubeb is the only continuous client).
+    // DONT_INHIBIT_AUTO_SUSPEND + a 2s READY wait is "PulseAudio record stream
+    // not ready" and Moonlight has no audio at all. Unsuspend the sink and let
+    // the record stream keep it awake so Steam UI and Cemu both capture.
+    if (source_name.size() > 8 && source_name.ends_with(".monitor")) {
+      const auto sink = source_name.substr(0, source_name.size() - 8);
+      if (auto *op = pa_context_suspend_sink_by_name(mic->ctx.get(), sink.c_str(), 0, nullptr, nullptr)) {
+        const auto unsuspend_deadline = std::chrono::steady_clock::now() + 1s;
+        while (pa_operation_get_state(op) == PA_OPERATION_RUNNING &&
+               std::chrono::steady_clock::now() < unsuspend_deadline) {
+          if (!mic->iterate(50000)) {
+            break;
+          }
+        }
+        pa_operation_unref(op);
+        BOOST_LOG(info) << "Unsuspended Pulse sink ["sv << sink << "] for monitor capture"sv;
+      }
+    }
+
+    const auto flags = PA_STREAM_ADJUST_LATENCY;
     if (auto status = pa_stream_connect_record(mic->stream.get(), source_name.c_str(), &pa_attr, flags)) {
       BOOST_LOG(error) << "pa_stream_connect_record() failed: "sv << pa_strerror(status);
       return nullptr;
     }
 
-    const auto stream_deadline = std::chrono::steady_clock::now() + 2s;
+    const auto stream_deadline = std::chrono::steady_clock::now() + 8s;
     while (pa_stream_get_state(mic->stream.get()) != PA_STREAM_READY) {
       const auto state = pa_stream_get_state(mic->stream.get());
       if (state == PA_STREAM_FAILED || state == PA_STREAM_TERMINATED ||
           std::chrono::steady_clock::now() >= stream_deadline) {
-        BOOST_LOG(error) << "PulseAudio record stream not ready"sv;
+        BOOST_LOG(error) << "PulseAudio record stream not ready ["sv << source_name
+                         << "] state="sv << static_cast<int>(state);
         return nullptr;
       }
       if (!mic->iterate(50000)) {
