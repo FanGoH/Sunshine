@@ -5,6 +5,7 @@
 // standard includes
 #include <codecvt>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -344,9 +345,9 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(info) << "Interrupt handler called"sv;
 
     auto task = []() {
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
+      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: exiting without SIGTRAP"sv;
       logging::log_flush();
-      lifetime::debug_trap();
+      std::_Exit(0);
     };
     force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
 
@@ -364,9 +365,9 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(info) << "Terminate handler called"sv;
 
     auto task = []() {
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
+      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: exiting without SIGTRAP"sv;
       logging::log_flush();
-      lifetime::debug_trap();
+      std::_Exit(0);
     };
     force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
 

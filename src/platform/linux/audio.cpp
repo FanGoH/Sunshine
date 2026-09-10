@@ -3,15 +3,21 @@
  * @brief Definitions for audio control on Linux.
  */
 // standard includes
+#include <algorithm>
 #include <bitset>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <memory>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 // lib includes
 #include <boost/regex.hpp>
 #include <pulse/error.h>
 #include <pulse/pulseaudio.h>
-#include <pulse/simple.h>
 
 // local includes
 #include "src/config.h"
@@ -63,9 +69,64 @@ namespace platf {
 
   /**
    * @brief PulseAudio recording stream and channel metadata.
+   *
+   * Game Mode's null-sink monitor is often silent (Cemu plays to gamescope).
+   * `pa_simple_read` blocks forever on that source, so session::join never
+   * finishes, Moonlight reconnects hit Initial Ping Timeout, and systemd
+   * SIGTERM hits `lifetime::debug_trap` after 10s. Iterate the mainloop with
+   * a timeout instead so shutdown is observed.
    */
   struct mic_attr_t: public mic_t {
-    util::safe_ptr<pa_simple, pa_simple_free> mic;  ///< PulseAudio simple recording stream for microphone capture.
+    std::unique_ptr<pa_mainloop, void (*)(pa_mainloop *)> loop {nullptr, pa_mainloop_free};
+    std::unique_ptr<pa_context, void (*)(pa_context *)> ctx {nullptr, pa_context_unref};
+    std::unique_ptr<pa_stream, void (*)(pa_stream *)> stream {nullptr, pa_stream_unref};
+    std::vector<std::uint8_t> pending;
+
+    ~mic_attr_t() override {
+      if (stream) {
+        pa_stream_set_read_callback(stream.get(), nullptr, nullptr);
+        const auto st = pa_stream_get_state(stream.get());
+        if (st != PA_STREAM_UNCONNECTED && st != PA_STREAM_FAILED && st != PA_STREAM_TERMINATED) {
+          pa_stream_disconnect(stream.get());
+        }
+      }
+      if (ctx) {
+        const auto st = pa_context_get_state(ctx.get());
+        if (st != PA_CONTEXT_UNCONNECTED && st != PA_CONTEXT_FAILED && st != PA_CONTEXT_TERMINATED) {
+          pa_context_disconnect(ctx.get());
+        }
+      }
+    }
+
+    static void stream_read(pa_stream *s, size_t /*nbytes*/, void *userdata) {
+      auto *self = static_cast<mic_attr_t *>(userdata);
+      const void *data = nullptr;
+      size_t count = 0;
+      if (pa_stream_peek(s, &data, &count) < 0) {
+        return;
+      }
+      if (data && count > 0) {
+        const auto *bytes = static_cast<const std::uint8_t *>(data);
+        self->pending.insert(self->pending.end(), bytes, bytes + count);
+      }
+      if (count > 0) {
+        pa_stream_drop(s);
+      }
+    }
+
+    bool iterate(int timeout_usec) {
+      if (!loop) {
+        return false;
+      }
+      if (pa_mainloop_prepare(loop.get(), timeout_usec) < 0) {
+        return false;
+      }
+      if (pa_mainloop_poll(loop.get()) < 0) {
+        return false;
+      }
+      pa_mainloop_dispatch(loop.get());
+      return true;
+    }
 
     /**
      * @brief Deliver a captured audio sample to Sunshine's audio pipeline.
@@ -74,16 +135,24 @@ namespace platf {
      * @return Capture status reported to the streaming pipeline.
      */
     capture_e sample(std::vector<float> &sample_buf) override {
-      auto sample_size = sample_buf.size();
-
-      auto buf = sample_buf.data();
-      int status;
-      if (pa_simple_read(mic.get(), buf, sample_size * sizeof(float), &status)) {
-        BOOST_LOG(error) << "pa_simple_read() failed: "sv << pa_strerror(status);
-
-        return capture_e::error;
+      const auto want = sample_buf.size() * sizeof(float);
+      const auto deadline = std::chrono::steady_clock::now() + 200ms;
+      while (pending.size() < want) {
+        if (stream) {
+          const auto st = pa_stream_get_state(stream.get());
+          if (st == PA_STREAM_FAILED || st == PA_STREAM_TERMINATED) {
+            return capture_e::error;
+          }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+          return capture_e::timeout;
+        }
+        if (!iterate(50000)) {
+          continue;
+        }
       }
-
+      std::memcpy(sample_buf.data(), pending.data(), want);
+      pending.erase(pending.begin(), pending.begin() + static_cast<std::ptrdiff_t>(want));
       return capture_e::ok;
     }
   };
@@ -100,14 +169,49 @@ namespace platf {
    */
   std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, std::string source_name) {
     auto mic = std::make_unique<mic_attr_t>();
+    mic->loop.reset(pa_mainloop_new());
+    if (!mic->loop) {
+      BOOST_LOG(error) << "pa_mainloop_new() failed"sv;
+      return nullptr;
+    }
+
+    mic->ctx.reset(pa_context_new(pa_mainloop_get_api(mic->loop.get()), "sunshine-record"));
+    if (!mic->ctx) {
+      BOOST_LOG(error) << "pa_context_new() failed"sv;
+      return nullptr;
+    }
+
+    if (auto status = pa_context_connect(mic->ctx.get(), nullptr, PA_CONTEXT_NOFLAGS, nullptr)) {
+      BOOST_LOG(error) << "pa_context_connect() failed: "sv << pa_strerror(status);
+      return nullptr;
+    }
+
+    const auto ctx_deadline = std::chrono::steady_clock::now() + 2s;
+    while (pa_context_get_state(mic->ctx.get()) != PA_CONTEXT_READY) {
+      const auto state = pa_context_get_state(mic->ctx.get());
+      if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED ||
+          std::chrono::steady_clock::now() >= ctx_deadline) {
+        BOOST_LOG(error) << "PulseAudio context not ready for record"sv;
+        return nullptr;
+      }
+      if (!mic->iterate(50000)) {
+        return nullptr;
+      }
+    }
 
     pa_sample_spec ss {PA_SAMPLE_FLOAT32, sample_rate, (std::uint8_t) channels};
-    pa_channel_map pa_map;
-
-    pa_map.channels = channels;
+    pa_channel_map pa_map {};
+    pa_map.channels = (std::uint8_t) channels;
     std::for_each_n(pa_map.map, pa_map.channels, [mapping](auto &channel) mutable {
       channel = position_mapping[*mapping++];
     });
+
+    mic->stream.reset(pa_stream_new(mic->ctx.get(), "sunshine-record", &ss, &pa_map));
+    if (!mic->stream) {
+      BOOST_LOG(error) << "pa_stream_new() failed"sv;
+      return nullptr;
+    }
+    pa_stream_set_read_callback(mic->stream.get(), &mic_attr_t::stream_read, mic.get());
 
     pa_buffer_attr pa_attr = {
       .maxlength = uint32_t(-1),
@@ -117,16 +221,23 @@ namespace platf {
       .fragsize = uint32_t(frame_size * channels * sizeof(float))
     };
 
-    int status;
-
-    mic->mic.reset(
-      pa_simple_new(nullptr, "sunshine", pa_stream_direction_t::PA_STREAM_RECORD, source_name.c_str(), "sunshine-record", &ss, &pa_map, &pa_attr, &status)
-    );
-
-    if (!mic->mic) {
-      auto err_str = pa_strerror(status);
-      BOOST_LOG(error) << "pa_simple_new() failed: "sv << err_str;
+    const auto flags = static_cast<pa_stream_flags_t>(PA_STREAM_ADJUST_LATENCY | PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND);
+    if (auto status = pa_stream_connect_record(mic->stream.get(), source_name.c_str(), &pa_attr, flags)) {
+      BOOST_LOG(error) << "pa_stream_connect_record() failed: "sv << pa_strerror(status);
       return nullptr;
+    }
+
+    const auto stream_deadline = std::chrono::steady_clock::now() + 2s;
+    while (pa_stream_get_state(mic->stream.get()) != PA_STREAM_READY) {
+      const auto state = pa_stream_get_state(mic->stream.get());
+      if (state == PA_STREAM_FAILED || state == PA_STREAM_TERMINATED ||
+          std::chrono::steady_clock::now() >= stream_deadline) {
+        BOOST_LOG(error) << "PulseAudio record stream not ready"sv;
+        return nullptr;
+      }
+      if (!mic->iterate(50000)) {
+        return nullptr;
+      }
     }
 
     return mic;
