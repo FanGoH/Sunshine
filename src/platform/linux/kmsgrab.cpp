@@ -3,9 +3,11 @@
  * @brief Definitions for KMS screen capture.
  */
 // standard includes
+#include <atomic>
 #include <errno.h>
 #include <fcntl.h>
 #include <filesystem>
+#include <optional>
 #include <ranges>
 #include <thread>
 #include <unistd.h>
@@ -1465,6 +1467,58 @@ namespace platf {
     };
 
     /**
+     * @brief Sample a DMA-BUF texture into a linear FBO and ReadPixels.
+     *
+     * AMD DCC/tiled scanout imports as GL_TEXTURE_2D but GetTextureSubImage
+     * returns zeros (Moonlight HDMI is black except the linear cursor plane).
+     * The GPU can still sample DCC; this is the same download as pwgrab.
+     */
+    gl::program_t *kms_dmabuf_download_program() {
+      static std::optional<gl::program_t> prog;
+      static bool failed = false;
+      if (failed) {
+        return nullptr;
+      }
+      if (prog) {
+        return &*prog;
+      }
+      constexpr auto vs_src = R"(#version 330
+        const vec2 v[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+        out vec2 uv;
+        void main() {
+          gl_Position = vec4(v[gl_VertexID], 0.0, 1.0);
+          uv = v[gl_VertexID] * 0.5 + 0.5;
+        }
+      )";
+      constexpr auto fs_src = R"(#version 330
+        uniform sampler2D u_tex;
+        in vec2 uv;
+        out vec4 color;
+        void main() { color = texture(u_tex, uv); }
+      )";
+      auto vs = gl::shader_t::compile(vs_src, GL_VERTEX_SHADER);
+      if (!vs.has_left()) {
+        BOOST_LOG(error) << "[kmsgrab] DMA-BUF download VS: "sv << vs.right();
+        failed = true;
+        return nullptr;
+      }
+      auto fs = gl::shader_t::compile(fs_src, GL_FRAGMENT_SHADER);
+      if (!fs.has_left()) {
+        BOOST_LOG(error) << "[kmsgrab] DMA-BUF download FS: "sv << fs.right();
+        failed = true;
+        return nullptr;
+      }
+      auto linked = gl::program_t::link(vs.left(), fs.left());
+      if (!linked.has_left()) {
+        BOOST_LOG(error) << "[kmsgrab] DMA-BUF download link: "sv << linked.right();
+        failed = true;
+        return nullptr;
+      }
+      prog = std::move(linked.left());
+      return &*prog;
+    }
+
+    /**
      * @brief KMS capture backend that copies frames into system memory.
      */
     class display_ram_t: public display_t {
@@ -1666,7 +1720,68 @@ namespace platf {
           return platf::capture_e::interrupted;
         }
 
-        gl::ctx.GetTextureSubImage(rgb->tex[0], 0, img_offset_x, img_offset_y, 0, width, height, 1, GL_BGRA, GL_UNSIGNED_BYTE, img_out->height * img_out->row_pitch, img_out->data);
+        // GetTextureSubImage on AMD DCC HDMI FBs is all zeros (cursor still
+        // composites). Sample into a linear FBO like pwgrab, then ReadPixels.
+        auto *download = kms_dmabuf_download_program();
+        if (!download) {
+          return capture_e::error;
+        }
+        const auto copy_w = std::max(w, width);
+        const auto copy_h = std::max(h, height);
+        GLuint dst_fbo = 0;
+        GLuint dst_tex = 0;
+        GLuint vao = 0;
+        gl::ctx.GenFramebuffers(1, &dst_fbo);
+        gl::ctx.GenTextures(1, &dst_tex);
+        gl::ctx.GenVertexArrays(1, &vao);
+        gl::ctx.BindTexture(GL_TEXTURE_2D, dst_tex);
+        gl::ctx.TexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, copy_w, copy_h);
+        gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
+        gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, dst_fbo);
+        gl::ctx.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
+        if (gl::ctx.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+          BOOST_LOG(error) << "[kmsgrab] DMA-BUF download FBO incomplete fourcc="sv << sd.fourcc
+                           << " modifier="sv << sd.modifier;
+          gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, 0);
+          gl::ctx.DeleteFramebuffers(1, &dst_fbo);
+          gl::ctx.DeleteTextures(1, &dst_tex);
+          gl::ctx.DeleteVertexArrays(1, &vao);
+          return capture_e::error;
+        }
+        gl::ctx.Viewport(0, 0, copy_w, copy_h);
+        gl::ctx.UseProgram(download->handle());
+        gl::ctx.ActiveTexture(GL_TEXTURE0);
+        gl::ctx.BindTexture(GL_TEXTURE_2D, rgb->tex[0]);
+        gl::ctx.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl::ctx.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl::ctx.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl::ctx.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        gl::ctx.BindVertexArray(vao);
+        gl::ctx.DrawArrays(GL_TRIANGLES, 0, 3);
+        gl::ctx.Finish();
+        gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, img_out->row_pitch / std::max(img_out->pixel_pitch, 1));
+        gl::ctx.ReadPixels(img_offset_x, img_offset_y, width, height, GL_BGRA, GL_UNSIGNED_BYTE, img_out->data);
+        gl::ctx.PixelStorei(GL_PACK_ROW_LENGTH, 0);
+        gl::ctx.BindVertexArray(0);
+        gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
+        gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl::ctx.UseProgram(0);
+        gl::ctx.DeleteFramebuffers(1, &dst_fbo);
+        gl::ctx.DeleteTextures(1, &dst_tex);
+        gl::ctx.DeleteVertexArrays(1, &vao);
+
+        static std::atomic<int> copies {0};
+        const int n = copies.fetch_add(1);
+        if (n < 8) {
+          size_t nonzero = 0;
+          const auto nbytes = static_cast<size_t>(height) * static_cast<size_t>(img_out->row_pitch);
+          for (size_t i = 0; i < nbytes; ++i) {
+            nonzero += img_out->data[i] != 0;
+          }
+          BOOST_LOG(info) << "[kmsgrab] DMA-BUF copied "sv << width << "x"sv << height
+                          << " nonzero="sv << nonzero << "/"sv << nbytes
+                          << " fourcc="sv << sd.fourcc << " modifier="sv << sd.modifier;
+        }
 
         img_out->frame_timestamp = frame_timestamp;
 
