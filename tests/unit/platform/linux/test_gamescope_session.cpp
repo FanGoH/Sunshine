@@ -115,4 +115,11 @@ TEST(GamescopeSessionTest, AbsTargetsHdmiSurfaceOnlyOnDisplay0WithoutOdinHack) {
   EXPECT_FALSE(platf::gamescope::abs_targets_hdmi_surface(1, true));
 }
 
+TEST(GamescopeSessionTest, AbsTargetsSteamOverlayOnlyOnDisplay0WhenOverlayOn) {
+  EXPECT_TRUE(platf::gamescope::abs_targets_steam_overlay(0, false, true));
+  EXPECT_FALSE(platf::gamescope::abs_targets_steam_overlay(0, false, false));
+  EXPECT_FALSE(platf::gamescope::abs_targets_steam_overlay(0, true, true));
+  EXPECT_FALSE(platf::gamescope::abs_targets_steam_overlay(1, false, true));
+}
+
 #endif

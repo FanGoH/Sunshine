@@ -197,6 +197,19 @@ namespace platf::gamescope {
    */
   [[nodiscard]] bool abs_targets_hdmi_surface(std::size_t display_index, bool primary_from_secondary);
 
+  /**
+   * @brief True when a display-0 tap should hit Steam Big Picture instead of Cemu TV.
+   *
+   * Hold-Select overlay (`STEAM_OVERLAY=1`) composites BPM on session `:0`.
+   * HDMI inject must not keep warping those taps onto Cemu TV on `:1`.
+   *
+   * @param display_index Zero-based Moonlight display index.
+   * @param primary_from_secondary True when video/0 captures the GamePad display.
+   * @param overlay_is_on True when Steam overlay is showing.
+   * @return True when overlay inject should own this packet.
+   */
+  [[nodiscard]] bool abs_targets_steam_overlay(std::size_t display_index, bool primary_from_secondary, bool overlay_is_on);
+
 }  // namespace platf::gamescope
 
 namespace platf {
@@ -254,7 +267,8 @@ namespace platf {
    * @brief Move the Cemu TV / Azahar Primary pointer from a display-0 abs mouse packet.
    *
    * Host uinput does not reach wx/GTK on session `:1`. Display 1 already warps
-   * GamePad View; display 0 needs the same for the HDMI surface. Do not use
+   * GamePad View; display 0 needs the same for the HDMI surface. When Steam
+   * overlay is on, warp Big Picture on `:0` instead of Cemu TV. Do not use
    * this for GamePad-only (`primary_from_secondary`).
    *
    * @param touch_port Display-0 touch port (`offset` + env size in pixels).

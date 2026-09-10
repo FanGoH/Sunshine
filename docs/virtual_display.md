@@ -150,7 +150,9 @@ on display 0 is skipped for the same `:1` wx/GTK reason. GamePad-only must
 not take the HDMI path. Checkpoint
 `checkpoint-2026-09-10-gamemode-gamepad-touch`. Live 2026-09-10 17:34 dual-stream:
 `HDMI inject: using :1` onto Cemu TV GL child (`1920×1051`) and
-`GamePad inject: using :1` onto GamePad GL child (`1920×1080`). Do not raise GamePad over TV.
+`GamePad inject: using :1` onto GamePad GL child (`1920×1080`). Hold-Select
+overlay (`STEAM_OVERLAY=1`) must warp Steam Big Picture on `:0`
+(`HDMI inject: overlay on :0` / `overlay-abs`), not Cemu TV. Do not raise GamePad over TV.
 
 ## Behavior without a supported source
 

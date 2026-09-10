@@ -138,6 +138,10 @@ namespace platf::gamescope {
     return display_index == 0 && !primary_from_secondary;
   }
 
+  bool abs_targets_steam_overlay(std::size_t display_index, bool primary_from_secondary, bool overlay_is_on) {
+    return overlay_is_on && abs_targets_hdmi_surface(display_index, primary_from_secondary);
+  }
+
 }  // namespace platf::gamescope
 
 #ifdef SUNSHINE_BUILD_X11
@@ -608,6 +612,23 @@ namespace {
   }
 
   /**
+   * @brief Steam Big Picture on `:0` when hold-Select overlay is showing.
+   *
+   * @return Overlay window, or `None`.
+   */
+  Window steam_overlay_window_if_on() {
+    auto *dpy = x11_display();
+    if (!dpy) {
+      return None;
+    }
+    const auto bpm = find_steam_overlay_window(dpy);
+    if (bpm == None || !overlay_is_on(dpy, bpm)) {
+      return None;
+    }
+    return bpm;
+  }
+
+  /**
    * @brief Translate window-local coordinates to root coordinates.
    *
    * @param dpy X11 display.
@@ -826,6 +847,7 @@ namespace {
    * Host uinput does not reach wx/GTK on session `:1`.
    *
    * @param dpy X11 display.
+   * @param frame Cemu TV / Azahar Primary, or Steam Big Picture when overlay is on.
    * @param nx Unit X in `[0, 1]`.
    * @param ny Unit Y in `[0, 1]`.
    * @param kind Log label.
@@ -834,17 +856,16 @@ namespace {
    * @param button Button number, or `0` for motion.
    * @return True when the HDMI surface exists and the event was flushed.
    */
-  bool inject_hdmi_unit(Display *dpy, float nx, float ny, std::string_view kind, int type, unsigned int state, unsigned int button) {
-    const auto tv = hdmi_surface_window(dpy);
-    if (tv == None) {
+  bool inject_hdmi_unit(Display *dpy, Window frame, float nx, float ny, std::string_view kind, int type, unsigned int state, unsigned int button) {
+    if (frame == None) {
       static bool logged_missing = false;
       if (!logged_missing) {
-        BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Azahar Primary Window on this Xwayland"sv;
+        BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Steam overlay window on this Xwayland"sv;
         logged_missing = true;
       }
       return false;
     }
-    const auto target = gamepad_input_window(dpy, tv);
+    const auto target = gamepad_input_window(dpy, frame);
 
     XWindowAttributes attr {};
     if (!XGetWindowAttributes(dpy, target, &attr) || attr.width <= 0 || attr.height <= 0) {
@@ -1018,10 +1039,6 @@ namespace platf {
   bool inject_hdmi_surface_abs_mouse(const touch_port_t &touch_port, float x, float y) {
 #ifdef SUNSHINE_BUILD_X11
     std::scoped_lock lock {x11_lock};
-    auto *dpy = x11_hdmi_display();
-    if (!dpy) {
-      return false;
-    }
     const auto [nx, ny] = platf::gamescope::abs_to_unit(
       x,
       y,
@@ -1030,7 +1047,24 @@ namespace platf {
       touch_port.width,
       touch_port.height
     );
-    return inject_hdmi_unit(dpy, nx, ny, "abs"sv, MotionNotify, hdmi_pointer_down ? Button1Mask : 0, 0);
+    const auto overlay = steam_overlay_window_if_on();
+    if (overlay != None) {
+      auto *dpy = x11_display();
+      if (!dpy) {
+        return false;
+      }
+      static bool logged_overlay = false;
+      if (!logged_overlay) {
+        BOOST_LOG(info) << "HDMI inject: overlay on "sv << DisplayString(dpy);
+        logged_overlay = true;
+      }
+      return inject_hdmi_unit(dpy, overlay, nx, ny, "overlay-abs"sv, MotionNotify, hdmi_pointer_down ? Button1Mask : 0, 0);
+    }
+    auto *dpy = x11_hdmi_display();
+    if (!dpy) {
+      return false;
+    }
+    return inject_hdmi_unit(dpy, hdmi_surface_window(dpy), nx, ny, "abs"sv, MotionNotify, hdmi_pointer_down ? Button1Mask : 0, 0);
 #else
     (void) touch_port;
     (void) x;
@@ -1047,16 +1081,25 @@ namespace platf {
     }
 
     std::scoped_lock lock {x11_lock};
-    auto *dpy = x11_hdmi_display();
-    if (!dpy || !last_hdmi_xy_valid) {
+    if (!last_hdmi_xy_valid) {
       return false;
     }
 
-    const auto tv = hdmi_surface_window(dpy);
-    if (tv == None) {
+    Display *dpy = nullptr;
+    Window frame = None;
+    const auto overlay = steam_overlay_window_if_on();
+    if (overlay != None) {
+      dpy = x11_display();
+      frame = overlay;
+    } else {
+      dpy = x11_hdmi_display();
+      frame = dpy ? hdmi_surface_window(dpy) : None;
+    }
+    if (!dpy || frame == None) {
       return false;
     }
-    const auto target = gamepad_input_window(dpy, tv);
+
+    const auto target = gamepad_input_window(dpy, frame);
     XWindowAttributes attr {};
     if (!XGetWindowAttributes(dpy, target, &attr) || attr.width <= 0 || attr.height <= 0) {
       return false;
