@@ -1472,10 +1472,12 @@ namespace platf {
      * AMD DCC/tiled scanout imports as GL_TEXTURE_2D but GetTextureSubImage
      * returns zeros (Moonlight HDMI is black except the linear cursor plane).
      * The GPU can still sample DCC; this is the same download as pwgrab.
+     *
+     * The program is owned by the current EGL context (`display_ram_t`).
+     * A process-static handle from a previous Moonlight session is invalid
+     * after reconnect (HDMI goes black, GamePad PipeWire still works).
      */
-    gl::program_t *kms_dmabuf_download_program() {
-      static std::optional<gl::program_t> prog;
-      static bool failed = false;
+    gl::program_t *kms_dmabuf_download_program(std::optional<gl::program_t> &prog, bool &failed) {
       if (failed) {
         return nullptr;
       }
@@ -1693,6 +1695,13 @@ namespace platf {
 
         egl::surface_descriptor_t sd;
 
+        auto *disp = std::get<0>(ctx.el);
+        auto egl_ctx = std::get<1>(ctx.el);
+        if (!eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_ctx)) {
+          BOOST_LOG(error) << "[kmsgrab] eglMakeCurrent failed: "sv << util::hex(eglGetError()).to_string_view();
+          return capture_e::error;
+        }
+
         std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
         auto status = refresh(fb_fd, &sd, frame_timestamp);
         if (status != capture_e::ok) {
@@ -1722,7 +1731,7 @@ namespace platf {
 
         // GetTextureSubImage on AMD DCC HDMI FBs is all zeros (cursor still
         // composites). Sample into a linear FBO like pwgrab, then ReadPixels.
-        auto *download = kms_dmabuf_download_program();
+        auto *download = kms_dmabuf_download_program(download_prog, download_failed);
         if (!download) {
           return capture_e::error;
         }
@@ -1821,6 +1830,8 @@ namespace platf {
       gbm::gbm_t gbm;  ///< GBM device used for buffer allocation.
       egl::display_t display;  ///< EGL display created from the GBM device.
       egl::ctx_t ctx;  ///< EGL context used to copy KMS frames into RAM.
+      std::optional<gl::program_t> download_prog;  ///< DCC sample program for this EGL context.
+      bool download_failed = false;  ///< True when shader compile/link failed for this context.
     };
 
     /**
