@@ -195,5 +195,21 @@ namespace stream {
      * @return PEM certificate associated with the session's client.
      */
     const std::string &client_cert(session_t &session);
+    /**
+     * @brief True when a session can take a new ENet control peer.
+     *
+     * STOPPING leftovers must not steal the next Moonlight CONNECT (same IP
+     * on session-id v1, or a connect-data collision) or the client sees
+     * "failed to start stream / control establishment error".
+     */
+    bool accepts_control_peer(state_e state);
+    /**
+     * @brief True when the control broadcast thread may stop after the app exits.
+     *
+     * `running_sessions` stays non-zero until session::join returns. If the
+     * control thread exits earlier, ENet goes unserviced while the broadcast
+     * object is still alive, and the next /launch never logs CLIENT CONNECTED.
+     */
+    bool control_loop_may_exit(bool app_running, bool session_awaiting_peer, unsigned active_sessions);
   }  // namespace session
 }  // namespace stream

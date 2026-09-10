@@ -4,6 +4,7 @@
  */
 
 // standard includes
+#include <atomic>
 #include <cstring>
 #include <fstream>
 #include <future>
@@ -722,6 +723,10 @@ namespace stream {
   static auto broadcast = safe::make_shared<broadcast_ctx_t>(start_broadcast, end_broadcast);
   std::atomic_bool video2_sender_ready {false};  ///< True while the shared UDP2 socket and sender are healthy.
 
+  namespace session {
+    extern std::atomic_uint running_sessions;
+  }
+
   /**
    * @brief Concrete owner stored behind a type-erased RTSP port reservation.
    */
@@ -828,6 +833,10 @@ namespace stream {
     auto lg = _sessions.lock();
     for (auto pos = std::begin(*_sessions); pos != std::end(*_sessions); ++pos) {
       auto session_p = *pos;
+
+      if (!session::accepts_control_peer(session_p->state.load(std::memory_order_acquire))) {
+        continue;
+      }
 
       // Skip sessions that are already established
       if (session_p->control.peer) {
@@ -1587,8 +1596,15 @@ namespace stream {
         })
       }
 
-      // Don't break until any pending sessions either expire or connect
-      if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
+      // Don't break until any pending sessions either expire or connect.
+      // App exit used to leave this loop while session::join was still
+      // blocked on Pulse. ENet then went unserviced (Moonlight: control
+      // establishment error / Initial Ping Timeout, no CLIENT CONNECTED).
+      if (session::control_loop_may_exit(
+            proc::proc.running() != 0,
+            has_session_awaiting_peer,
+            session::running_sessions.load(std::memory_order_acquire)
+          )) {
         BOOST_LOG(info) << "Process terminated"sv;
         break;
       }
@@ -2722,6 +2738,14 @@ namespace stream {
 
   namespace session {
     std::atomic_uint running_sessions;  ///< Running sessions.
+
+    bool accepts_control_peer(state_e state) {
+      return state == state_e::STARTING || state == state_e::RUNNING;
+    }
+
+    bool control_loop_may_exit(bool app_running, bool session_awaiting_peer, unsigned active_sessions) {
+      return !app_running && !session_awaiting_peer && active_sessions == 0;
+    }
 
     /**
      * @brief Platform handle returned from stream setup.

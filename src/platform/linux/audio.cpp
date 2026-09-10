@@ -71,10 +71,10 @@ namespace platf {
    * @brief PulseAudio recording stream and channel metadata.
    *
    * Game Mode's null-sink monitor is often silent (Cemu plays to gamescope).
-   * `pa_simple_read` blocks forever on that source, so session::join never
-   * finishes, Moonlight reconnects hit Initial Ping Timeout, and systemd
-   * SIGTERM hits `lifetime::debug_trap` after 10s. Iterate the mainloop with
-   * a timeout instead so shutdown is observed.
+   * `pa_simple_read` and `pa_mainloop_poll` can block forever on that source,
+   * so session::join never finishes, the control thread exits on app stop,
+   * and Moonlight hits control establishment error / Initial Ping Timeout.
+   * Drive Pulse with non-blocking `pa_mainloop_iterate` so shutdown is observed.
    */
   struct mic_attr_t: public mic_t {
     std::unique_ptr<pa_mainloop, void (*)(pa_mainloop *)> loop {nullptr, pa_mainloop_free};
@@ -118,14 +118,22 @@ namespace platf {
       if (!loop) {
         return false;
       }
-      if (pa_mainloop_prepare(loop.get(), timeout_usec) < 0) {
-        return false;
+      // pa_mainloop_poll() can ignore prepare()'s timeout on a silent
+      // Game Mode PipeWire-pulse monitor and block forever, so session::join
+      // never returns and the next Moonlight tap hits control establishment
+      // error. Drive the loop non-blocking and sleep ourselves.
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(std::max(timeout_usec, 0));
+      for (;;) {
+        int retval = 0;
+        const int dispatched = pa_mainloop_iterate(loop.get(), 0, &retval);
+        if (dispatched < 0) {
+          return false;
+        }
+        if (dispatched > 0 || std::chrono::steady_clock::now() >= deadline) {
+          return true;
+        }
+        std::this_thread::sleep_for(5ms);
       }
-      if (pa_mainloop_poll(loop.get()) < 0) {
-        return false;
-      }
-      pa_mainloop_dispatch(loop.get());
-      return true;
     }
 
     /**
@@ -148,7 +156,7 @@ namespace platf {
           return capture_e::timeout;
         }
         if (!iterate(50000)) {
-          continue;
+          return capture_e::error;
         }
       }
       std::memcpy(sample_buf.data(), pending.data(), want);
