@@ -441,6 +441,23 @@ namespace pipewire {
       return stream_data.pw_state;
     }
 
+    /**
+     * @brief Create a link-factory edge when AUTOCONNECT never leaves connecting.
+     *
+     * Headless gamescope Video/Source nodes stay `suspended` until a consumer
+     * is linked. WirePlumber cannot see them (same as KWin
+     * object.register=false). ensure_capture_link() existed but was never
+     * called, so video/1 encoded dummy_img() black forever.
+     */
+    void try_capture_link() {
+      if (!loop || stopped) {
+        return;
+      }
+      pw_thread_loop_lock(loop);
+      ensure_capture_link(&stream_data);
+      pw_thread_loop_unlock(loop);
+    }
+
     void release_current_buffer() {
       pw_thread_loop_lock(loop);
       {
@@ -891,6 +908,9 @@ namespace pipewire {
         // object: it fails with "unknown input/output port (null)" and can
         // leave KWin producing only the first (cleared) buffer.
         d->link_requested = true;
+      } else if (state == PW_STREAM_STATE_CONNECTING || state == PW_STREAM_STATE_PAUSED) {
+        // gamescope-virtual never AUTOCONNECTs; link-factory unsuspends the source.
+        ensure_capture_link(d);
       }
 
       switch (state) {
@@ -1675,6 +1695,7 @@ namespace pipewire {
         // buffer. Failing here made Moonlight report "second display ended"
         // while HDMI was still live. Snapshot timeouts already re-present.
         BOOST_LOG(warning) << "[pipewire] stream still connecting after ensure_stream; capturing anyway"sv;
+        pipewire.try_capture_link();
       }
       sleep_overshoot_logger.reset();
 
@@ -1682,6 +1703,9 @@ namespace pipewire {
       bool pacing_required = pipewire.is_pacing_required(target_framerate, delay);
 
       while (true) {
+        if (pipewire.stream_state() == PW_STREAM_STATE_CONNECTING && !pipewire.is_cpu_frame_valid()) {
+          pipewire.try_capture_link();
+        }
         // Check if PipeWire signaled a dead stream
         if (shared_state->stream_dead.exchange(false)) {
           // Additional custom error-handling for subclasses on stream dead event
