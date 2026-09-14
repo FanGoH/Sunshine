@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -178,6 +179,26 @@ namespace platf::gamescope {
    * @return True when the high bit is set.
    */
   [[nodiscard]] bool touch_is_second_display(std::uint32_t pointer_id);
+
+  /**
+   * @brief Second Screen QAM mirror target (`$XDG_RUNTIME_DIR/second-screen-touch`).
+   *
+   * `ffplay` `x11grab` is a video copy. Bottom-stream taps still have to hit the
+   * source xid on `:0` / `:1` when GamePad View / Azahar Secondary is absent
+   * (CIA install dialogs, arbitrary mirrored windows). Never `:2`.
+   */
+  struct second_screen_touch_t {
+    std::string display;  ///< Session Xwayland (`:0` or `:1`).
+    unsigned long xid = 0;  ///< Source window id.
+  };
+
+  /**
+   * @brief Parse a Second Screen touch sidecar.
+   *
+   * @param text `key=value` lines (`display=`, `xid=`).
+   * @return Target when `xid` is set and display is not headless `:2`.
+   */
+  [[nodiscard]] std::optional<second_screen_touch_t> parse_second_screen_touch(std::string_view text);
 
   /**
    * @brief True when Game Mode should warp this absolute mouse onto GamePad View.

@@ -10,8 +10,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -147,6 +149,45 @@ namespace platf::gamescope {
 
   bool touch_is_second_display(std::uint32_t pointer_id) {
     return (pointer_id & TOUCH_SECOND_DISPLAY_POINTER) != 0;
+  }
+
+  std::optional<second_screen_touch_t> parse_second_screen_touch(std::string_view text) {
+    second_screen_touch_t out;
+    bool have_xid = false;
+    std::istringstream in {std::string {text}};
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.empty() || line[0] == '#') {
+        continue;
+      }
+      const auto eq = line.find('=');
+      if (eq == std::string::npos) {
+        continue;
+      }
+      const auto key = line.substr(0, eq);
+      auto val = line.substr(eq + 1);
+      while (!val.empty() && (val.back() == '\r' || val.back() == ' ')) {
+        val.pop_back();
+      }
+      if (key == "display") {
+        out.display = val;
+      } else if (key == "xid" && !val.empty()) {
+        char *end = nullptr;
+        const int base = (val.size() > 1 && val[0] == '0' && (val[1] == 'x' || val[1] == 'X')) ? 16 : 0;
+        out.xid = std::strtoul(val.c_str(), &end, base);
+        have_xid = end != val.c_str() && out.xid != 0;
+      }
+    }
+    if (!have_xid) {
+      return std::nullopt;
+    }
+    if (out.display.empty()) {
+      out.display = ":0";
+    }
+    if (out.display == ":2" || out.display.rfind(":2.", 0) == 0) {
+      return std::nullopt;
+    }
+    return out;
   }
 
   bool abs_targets_gamepad_view(std::size_t display_index, bool primary_from_secondary) {
@@ -520,6 +561,89 @@ namespace {
   }
 
   /**
+   * @brief Strip screen number from an X11 display name (`:0.0` → `:0`).
+   *
+   * @param name `DisplayString` or sidecar `display=`.
+   * @return Display without a trailing `.0`.
+   */
+  std::string display_stem(std::string_view name) {
+    std::string out {name};
+    if (out.size() >= 2 && out.compare(out.size() - 2, 2, ".0") == 0) {
+      out.resize(out.size() - 2);
+    }
+    return out;
+  }
+
+  /**
+   * @brief Read `$XDG_RUNTIME_DIR/second-screen-touch` (or `SECOND_SCREEN_TOUCH_FILE`).
+   *
+   * @return Parsed target, or nullopt when missing / `:2`.
+   */
+  std::optional<platf::gamescope::second_screen_touch_t> load_second_screen_touch() {
+    std::string path;
+    if (const char *env = std::getenv("SECOND_SCREEN_TOUCH_FILE")) {
+      if (env[0]) {
+        path = env;
+      }
+    }
+    if (path.empty()) {
+      if (const char *rt = std::getenv("XDG_RUNTIME_DIR")) {
+        path = std::string {rt} + "/second-screen-touch";
+      }
+    }
+    if (path.empty()) {
+      return std::nullopt;
+    }
+    std::ifstream in {path};
+    if (!in) {
+      return std::nullopt;
+    }
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    return platf::gamescope::parse_second_screen_touch(buf.str());
+  }
+
+  /**
+   * @brief True when *window* is the live Second Screen mirror source on *dpy*.
+   *
+   * @param dpy Session Xwayland.
+   * @param window Candidate xid.
+   * @return True when the sidecar matches this display and xid.
+   */
+  bool sidecar_xid_on_display(Display *dpy, Window window) {
+    const auto touch = load_second_screen_touch();
+    if (!touch) {
+      return false;
+    }
+    if (window != static_cast<Window>(touch->xid)) {
+      return false;
+    }
+    return display_stem(DisplayString(dpy)) == display_stem(touch->display);
+  }
+
+  /**
+   * @brief Source xid from the Second Screen QAM mirror sidecar.
+   *
+   * @param dpy Session Xwayland (`:0` / `:1`).
+   * @return Window id, or `None`.
+   */
+  Window second_screen_touch_window(Display *dpy) {
+    const auto touch = load_second_screen_touch();
+    if (!touch) {
+      return None;
+    }
+    if (display_stem(DisplayString(dpy)) != display_stem(touch->display)) {
+      return None;
+    }
+    const auto window = static_cast<Window>(touch->xid);
+    XWindowAttributes attr {};
+    if (!XGetWindowAttributes(dpy, window, &attr) || attr.width <= 0 || attr.height <= 0) {
+      return None;
+    }
+    return window;
+  }
+
+  /**
    * @brief Return the GamePad View or Azahar Secondary Window, refreshing a stale cache.
    *
    * @param dpy X11 display.
@@ -530,7 +654,7 @@ namespace {
       XWindowAttributes attr {};
       if (XGetWindowAttributes(dpy, cached_pad, &attr) && attr.width > 0 && attr.height > 0) {
         const auto title = window_title(dpy, cached_pad);
-        if (platf::gamescope::title_is_touch_surface(title)) {
+        if (platf::gamescope::title_is_touch_surface(title) || sidecar_xid_on_display(dpy, cached_pad)) {
           return cached_pad;
         }
       }
@@ -538,6 +662,13 @@ namespace {
       cached_pad_dpy = nullptr;
     }
     cached_pad = find_window(dpy, platf::gamescope::title_is_touch_surface);
+    if (cached_pad == None) {
+      cached_pad = second_screen_touch_window(dpy);
+      if (cached_pad != None) {
+        BOOST_LOG(info) << "GamePad inject: Second Screen mirror xid="sv << cached_pad
+                        << " on "sv << DisplayString(dpy);
+      }
+    }
     cached_pad_dpy = cached_pad != None ? dpy : nullptr;
     return cached_pad;
   }
@@ -570,7 +701,7 @@ namespace {
     }
     static bool logged_missing = false;
     if (!logged_missing) {
-      BOOST_LOG(warning) << "GamePad inject: no GamePad View / Azahar Secondary Window on :1 or :0"sv;
+      BOOST_LOG(warning) << "GamePad inject: no GamePad View / Azahar Secondary Window / Second Screen mirror on :1 or :0"sv;
       logged_missing = true;
     }
     return nullptr;

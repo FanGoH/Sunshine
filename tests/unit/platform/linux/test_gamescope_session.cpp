@@ -79,6 +79,19 @@ TEST(GamescopeSessionTest, TogglesOverlayAction) {
   EXPECT_EQ(platf::gamescope::overlay_toggle_action(true), platf::gamescope::overlay_action_e::hide);
 }
 
+TEST(GamescopeSessionTest, ParsesSecondScreenTouchSidecar) {
+  const auto touch = platf::gamescope::parse_second_screen_touch("display=:0\nxid=0x60000a\n");
+  ASSERT_TRUE(touch.has_value());
+  EXPECT_EQ(touch->display, ":0");
+  EXPECT_EQ(touch->xid, 0x60000aUL);
+  EXPECT_FALSE(platf::gamescope::parse_second_screen_touch("display=:2\nxid=0x400015\n").has_value());
+  EXPECT_FALSE(platf::gamescope::parse_second_screen_touch("display=:0\nxid=0\n").has_value());
+  const auto decimal = platf::gamescope::parse_second_screen_touch("xid=6291466\n");
+  ASSERT_TRUE(decimal.has_value());
+  EXPECT_EQ(decimal->display, ":0");
+  EXPECT_EQ(decimal->xid, 6291466UL);
+}
+
 TEST(GamescopeSessionTest, ResolvesOverlayAppid) {
   EXPECT_EQ(platf::gamescope::resolve_overlay_appid(2374129079U, 769U, 2374129079U), 2374129079U);
   EXPECT_EQ(platf::gamescope::resolve_overlay_appid(std::nullopt, 769U, 2374129079U), 2374129079U);
