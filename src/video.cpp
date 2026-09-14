@@ -3126,6 +3126,31 @@ namespace video {
     config.framerateX100 = 0;
   }
 
+  void cap_paired_encode_fps(config_t &primary, config_t *secondary) {
+    constexpr int kMax = 60;
+    int target = kMax;
+    if (primary.framerate > 0) {
+      target = std::min(target, primary.framerate);
+    }
+    if (secondary && secondary->framerate > 0) {
+      target = std::min(target, secondary->framerate);
+    }
+    auto apply = [target](config_t &config, const char *which) {
+      if (config.framerate <= target) {
+        return;
+      }
+      BOOST_LOG(info) << "Capping "sv << which << " at "sv << target
+                      << "fps (client asked "sv << config.framerate
+                      << "fps; paired min of both streams)"sv;
+      config.framerate = target;
+      config.framerateX100 = 0;
+    };
+    apply(primary, "video/0");
+    if (secondary) {
+      apply(*secondary, "video/1");
+    }
+  }
+
   void capture(
     safe::mail_t mail,
     config_t config,

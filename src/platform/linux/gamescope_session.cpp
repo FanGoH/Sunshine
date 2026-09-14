@@ -1062,8 +1062,17 @@ namespace platf {
     }
 
     const auto bpm = find_steam_overlay_window(dpy);
-    const auto tv = find_window(dpy, platf::gamescope::title_is_hdmi_surface);
-    remember_appid(dpy, tv);
+    // Cemu TV / Azahar Primary live on :1 after FOCUS_DISPLAY=1. Searching
+    // only :0 leaves hide_overlay(tv=0) and Steam cannot restore the game.
+    Window tv = find_window(dpy, platf::gamescope::title_is_hdmi_surface);
+    Display *hdmi_dpy = nullptr;
+    if (tv == None) {
+      hdmi_dpy = x11_hdmi_display();
+      if (hdmi_dpy) {
+        tv = hdmi_surface_window(hdmi_dpy);
+      }
+    }
+    remember_appid(hdmi_dpy ? hdmi_dpy : dpy, tv);
     const auto appid = remembered_appid;
     if (bpm == None) {
       steam_overlay_toggle_via_steam();

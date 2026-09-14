@@ -701,6 +701,14 @@ namespace video {
   void cap_gamescope_virtual_fps(config_t &config, const char *why);
 
   /**
+   * Cap video/0 and video/1 to the same fps: min(client0, client1, 60).
+   *
+   * HDMI and `:2` can keep different resolutions. Encode clocks must match
+   * or a 120fps sibling fights 4K@60 scanout.
+   */
+  void cap_paired_encode_fps(config_t &primary, config_t *secondary);
+
+  /**
    * @brief Capture and encode video for a streaming session.
    *
    * @param mail Session mail bus.

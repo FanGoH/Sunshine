@@ -2567,6 +2567,9 @@ namespace stream {
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
     std::string capture_output;
+    if (session->config.monitor2) {
+      video::cap_paired_encode_fps(session->config.monitor, &*session->config.monitor2);
+    }
     if (session->config.primary_from_secondary) {
       video::cap_gamescope_virtual_fps(session->config.monitor, "GamePad-as-primary");
       session->second_display = dual_display::acquire({
