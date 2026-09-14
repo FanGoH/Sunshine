@@ -67,13 +67,22 @@ namespace platf::gamescope {
    * @brief True when an X11 title is the HDMI / TV game surface.
    *
    * Overlay hide restores this window as `GAMESCOPECTRL_BASELAYER_WINDOW`.
-   * Azahar top screen is `Primary Window`. Do not match the library window or
-   * the touch surface.
+   * Azahar top screen is `Primary Window`. HDMI-only / RetroDECK Azahar is the
+   * stacked library caption (`Azahar … | GAME` without Primary/Secondary).
+   * Do not match the touch surface.
    *
    * @param title Window title.
-   * @return True for Cemu TV or Azahar Primary Window.
+   * @return True for Cemu TV, Azahar Primary Window, or stacked Azahar.
    */
   [[nodiscard]] bool title_is_hdmi_surface(std::string_view title);
+
+  /**
+   * @brief True when Azahar is one stacked window (no Separate Windows).
+   *
+   * @param title Window title.
+   * @return True for RetroDECK / single-screen Azahar.
+   */
+  [[nodiscard]] bool title_is_azahar_stacked(std::string_view title);
 
   /**
    * @brief Map a normalized touch point onto a window in pixels.
@@ -286,5 +295,18 @@ namespace platf {
    * @return True when the HDMI surface received the button event.
    */
   bool inject_hdmi_surface_button(int button, bool release);
+
+  /**
+   * @brief Send a display-0 touch to Cemu TV / stacked or Primary Azahar.
+   *
+   * HDMI-only RetroDECK Azahar is one stacked window (no Secondary Window).
+   * Display-1 GamePad inject does not see it. Host uinput does not reach Qt
+   * on session `:1`.
+   *
+   * @param touch_port Viewport used to size the event (unused for 0–1 coords).
+   * @param touch Touch event in monitor-local `[0, 1]` coordinates.
+   * @return True when the event was delivered to the HDMI surface.
+   */
+  bool inject_hdmi_surface_touch(const touch_port_t &touch_port, const touch_input_t &touch);
 
 }  // namespace platf

@@ -48,6 +48,23 @@ namespace platf::gamescope {
     return title.find("Cemu ") != std::string_view::npos;
   }
 
+  bool title_is_azahar_window(std::string_view title) {
+    return title.find("Azahar ") != std::string_view::npos;
+  }
+
+  bool title_is_azahar_stacked(std::string_view title) {
+    if (!title_is_azahar_window(title)) {
+      return false;
+    }
+    if (title.find("Primary Window") != std::string_view::npos) {
+      return false;
+    }
+    if (title.find("Secondary Window") != std::string_view::npos) {
+      return false;
+    }
+    return true;
+  }
+
   bool title_is_touch_surface(std::string_view title) {
     if (title_is_gamepad_view(title)) {
       return true;
@@ -62,7 +79,12 @@ namespace platf::gamescope {
     if (title_is_cemu_tv(title)) {
       return true;
     }
-    return title.find("Primary Window") != std::string_view::npos;
+    if (title.find("Primary Window") != std::string_view::npos) {
+      return true;
+    }
+    // RetroDECK / HDMI-only Azahar is one stacked window (top+bottom). Taps
+    // on display 0 must hit that surface; Separate Windows still uses Primary.
+    return title_is_azahar_stacked(title);
   }
 
   std::pair<int, int> touch_to_window_xy(float x, float y, int width, int height) {
@@ -153,7 +175,7 @@ namespace {
   Display *cached_pad_dpy = nullptr;  ///< Display that owns `cached_pad`.
   Window cached_pad = None;  ///< Last GamePad View / Azahar Secondary xid.
   Display *cached_hdmi_dpy = nullptr;  ///< Display that owns `cached_hdmi`.
-  Window cached_hdmi = None;  ///< Last Cemu TV / Azahar Primary xid.
+  Window cached_hdmi = None;  ///< Last Cemu TV / Azahar HDMI-surface xid.
   int last_hdmi_x = 0;  ///< Last TV-local pointer X (for mouse-button packets).
   int last_hdmi_y = 0;  ///< Last TV-local pointer Y (for mouse-button packets).
   bool last_hdmi_xy_valid = false;  ///< True after at least one display-0 motion.
@@ -605,7 +627,7 @@ namespace {
     }
     static bool logged_missing = false;
     if (!logged_missing) {
-      BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Azahar Primary Window on :1 or :0"sv;
+      BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Azahar window on :1 or :0"sv;
       logged_missing = true;
     }
     return nullptr;
@@ -1117,6 +1139,60 @@ namespace platf {
 #else
     (void) button;
     (void) release;
+    return false;
+#endif
+  }
+
+  bool inject_hdmi_surface_touch(const touch_port_t &touch_port, const touch_input_t &touch) {
+    (void) touch_port;
+#ifdef SUNSHINE_BUILD_X11
+    if (platf::gamescope::touch_is_second_display(touch.pointerId)) {
+      return false;
+    }
+
+    std::scoped_lock lock {x11_lock};
+    const auto overlay = steam_overlay_window_if_on();
+    Display *dpy = nullptr;
+    Window frame = None;
+    if (overlay != None) {
+      dpy = x11_display();
+      frame = overlay;
+    } else {
+      dpy = x11_hdmi_display();
+      frame = dpy ? hdmi_surface_window(dpy) : None;
+    }
+    if (!dpy || frame == None) {
+      return false;
+    }
+
+    switch (touch.eventType) {
+      case LI_TOUCH_EVENT_CANCEL_ALL:
+        if (hdmi_pointer_down) {
+          const auto ok = inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-cancel"sv, ButtonRelease, Button1Mask, Button1);
+          hdmi_pointer_down = false;
+          return ok;
+        }
+        return true;
+      case LI_TOUCH_EVENT_UP:
+      case LI_TOUCH_EVENT_CANCEL:
+      case LI_TOUCH_EVENT_HOVER_LEAVE:
+        hdmi_pointer_down = false;
+        return inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-up"sv, ButtonRelease, Button1Mask, Button1);
+      case LI_TOUCH_EVENT_DOWN:
+        if (!inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-move"sv, MotionNotify, 0, 0)) {
+          return false;
+        }
+        hdmi_pointer_down = true;
+        return inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-down"sv, ButtonPress, 0, Button1);
+      case LI_TOUCH_EVENT_MOVE:
+        return inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-drag"sv, MotionNotify, hdmi_pointer_down ? Button1Mask : 0, 0);
+      case LI_TOUCH_EVENT_HOVER:
+        return inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-hover"sv, MotionNotify, 0, 0);
+      default:
+        return false;
+    }
+#else
+    (void) touch;
     return false;
 #endif
   }

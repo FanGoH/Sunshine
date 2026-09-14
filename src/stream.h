@@ -211,5 +211,13 @@ namespace stream {
      * object is still alive, and the next /launch never logs CLIENT CONNECTED.
      */
     bool control_loop_may_exit(bool app_running, bool session_awaiting_peer, unsigned active_sessions);
+    /**
+     * @brief True when this disconnect is the last live Moonlight session.
+     *
+     * `stop()` used `running_sessions <= 1`, which closed Desktop (and the
+     * remaining Thor/Odin peer) when the counter lagged RTSP. Count *other*
+     * STARTING/RUNNING sessions instead.
+     */
+    bool should_close_desktop_on_disconnect(unsigned other_live_sessions);
   }  // namespace session
 }  // namespace stream

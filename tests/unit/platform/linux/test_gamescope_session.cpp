@@ -42,7 +42,10 @@ TEST(GamescopeSessionTest, MatchesAzaharTouchAndHdmiSurfaces) {
   EXPECT_TRUE(platf::gamescope::title_is_hdmi_surface("Cemu 2.6 - FPS: 30.00 [OpenGL] The Wind Waker HD"));
   EXPECT_TRUE(platf::gamescope::title_is_hdmi_surface(kPrimary));
   EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface(kSecondary));
-  EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface(kLibrary));
+  EXPECT_TRUE(platf::gamescope::title_is_hdmi_surface(kLibrary));
+  EXPECT_TRUE(platf::gamescope::title_is_azahar_stacked(kLibrary));
+  EXPECT_FALSE(platf::gamescope::title_is_azahar_stacked(kPrimary));
+  EXPECT_FALSE(platf::gamescope::title_is_azahar_stacked(kSecondary));
   EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface("GamePad View - FPS: 30.00"));
 }
 

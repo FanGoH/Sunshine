@@ -1095,6 +1095,9 @@ namespace platf {
     if (inject_gamepad_view_touch(touch_port, touch)) {
       return;
     }
+    if (config::video.dual_display_source == "gamescope-virtual"sv && inject_hdmi_surface_touch(touch_port, touch)) {
+      return;
+    }
     if (gamescope::touch_is_second_display(touch.pointerId) && config::video.dual_display_source == "gamescope-virtual"sv) {
       BOOST_LOG(debug) << "display-1 touch dropped: no GamePad View window"sv;
       return;

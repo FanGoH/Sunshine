@@ -35,3 +35,9 @@ TEST(SessionLifecycle, ControlLoopStaysUpWhileSessionsJoin) {
   EXPECT_FALSE(stream::session::control_loop_may_exit(false, true, 0));
   EXPECT_TRUE(stream::session::control_loop_may_exit(false, false, 0));
 }
+
+TEST(SessionLifecycle, DisconnectDoesNotCloseDesktopWhileAnotherClientIsLive) {
+  EXPECT_FALSE(stream::session::should_close_desktop_on_disconnect(1));
+  EXPECT_FALSE(stream::session::should_close_desktop_on_disconnect(2));
+  EXPECT_TRUE(stream::session::should_close_desktop_on_disconnect(0));
+}

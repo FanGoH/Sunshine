@@ -939,10 +939,10 @@ namespace stream {
           }
           break;
         case ENET_EVENT_TYPE_CONNECT:
-          BOOST_LOG(info) << "CLIENT CONNECTED"sv;
+          BOOST_LOG(info) << "CLIENT CONNECTED ["sv << session->client_name << ']';
           break;
         case ENET_EVENT_TYPE_DISCONNECT:
-          BOOST_LOG(info) << "CLIENT DISCONNECTED"sv;
+          BOOST_LOG(info) << "CLIENT DISCONNECTED ["sv << session->client_name << ']';
           // No more clients to send video data to ^_^
           if (session->state == session::state_e::RUNNING) {
             session::stop(*session);
@@ -2747,6 +2747,10 @@ namespace stream {
       return !app_running && !session_awaiting_peer && active_sessions == 0;
     }
 
+    bool should_close_desktop_on_disconnect(unsigned other_live_sessions) {
+      return other_live_sessions == 0;
+    }
+
     /**
      * @brief Platform handle returned from stream setup.
      */
@@ -2781,7 +2785,22 @@ namespace stream {
 
       // Close Desktop before join() so the next Moonlight tap can /launch even
       // if Pulse sample() is still blocked. Cemu (real cmd) stays BUSY.
-      if (running_sessions.load(std::memory_order_acquire) <= 1) {
+      // Count other STARTING/RUNNING peers — `running_sessions <= 1` closed
+      // Desktop (and the remaining Thor/Odin session) while two clients were
+      // still live. This session is already STOPPING so it is not counted.
+      unsigned others = 0;
+      if (session.broadcast_ref) {
+        auto lg = session.broadcast_ref->control_server._sessions.lock();
+        for (auto *live : *session.broadcast_ref->control_server._sessions) {
+          if (live && live != &session && accepts_control_peer(live->state.load(std::memory_order_acquire))) {
+            ++others;
+          }
+        }
+      }
+      BOOST_LOG(info) << "Stopping session ["sv << session.client_name
+                      << "] other live sessions="sv << others
+                      << " running_sessions="sv << running_sessions.load(std::memory_order_acquire);
+      if (should_close_desktop_on_disconnect(others)) {
         proc::proc.terminate_if_placebo();
       }
     }
