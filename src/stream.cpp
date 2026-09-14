@@ -2568,6 +2568,7 @@ namespace stream {
     BOOST_LOG(debug) << "Start capturing Video"sv;
     std::string capture_output;
     if (session->config.primary_from_secondary) {
+      video::cap_gamescope_virtual_fps(session->config.monitor, "GamePad-as-primary");
       session->second_display = dual_display::acquire({
         session->config.monitor.width,
         session->config.monitor.height,
@@ -2661,6 +2662,7 @@ namespace stream {
       return;
     }
 
+    video::cap_gamescope_virtual_fps(*session->config.monitor2, "video/1");
     session->second_display = dual_display::acquire({
       session->config.monitor2->width,
       session->config.monitor2->height,

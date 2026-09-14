@@ -693,6 +693,14 @@ namespace video {
   config_t resolve_dynamic_range(const encoder_t &encoder, config_t config);
 
   /**
+   * Cap gamescope-virtual / GamePad capture at 60fps.
+   *
+   * Odin often asks for 120fps. Software x264 at 8.3ms on :2 while HDMI is
+   * 4K@60 makes the TV flicker. The GamePad UI does not need 120.
+   */
+  void cap_gamescope_virtual_fps(config_t &config, const char *why);
+
+  /**
    * @brief Capture and encode video for a streaming session.
    *
    * @param mail Session mail bus.

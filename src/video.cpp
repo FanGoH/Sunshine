@@ -3115,12 +3115,26 @@ namespace video {
    * @param config Client-requested video configuration, normalized before capture begins.
    * @param channel_data Opaque channel data passed to packets.
    */
+  void cap_gamescope_virtual_fps(config_t &config, const char *why) {
+    constexpr int kMax = 60;
+    if (config.framerate <= kMax) {
+      return;
+    }
+    BOOST_LOG(info) << "Capping "sv << why << " at "sv << kMax
+                    << "fps (client asked "sv << config.framerate << "fps) so 4K HDMI can scan out"sv;
+    config.framerate = kMax;
+    config.framerateX100 = 0;
+  }
+
   void capture(
     safe::mail_t mail,
     config_t config,
     void *channel_data,
     const std::string &output_name
   ) {
+    if (!output_name.empty()) {
+      cap_gamescope_virtual_fps(config, output_name.c_str());
+    }
     config = resolve_dynamic_range(*chosen_encoder, config);
 
     auto idr_events = mail->event<bool>(mail::idr);
@@ -3160,6 +3174,7 @@ namespace video {
     void *channel_data,
     const std::string &output_name
   ) {
+    cap_gamescope_virtual_fps(config, output_name.empty() ? "video/1" : output_name.c_str());
     auto idr_events = mail->event<bool>(mail::idr2);
     idr_events->raise(true);
 
