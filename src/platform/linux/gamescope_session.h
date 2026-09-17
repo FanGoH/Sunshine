@@ -259,12 +259,12 @@ namespace platf {
    * @brief Send a display-1 touch to the GamePad / Azahar bottom window.
    *
    * Game Mode keeps HDMI and the touch surface stacked at session `:1` `0,0`
-   * (Steam stays on `:0`). Host
-   * uinput hits the raised TV / Primary Window. XSendEvent targets GamePad
-   * View or Azahar Secondary Window without raising it.
+   * (Steam stays on `:0`). XSendEvent targets GamePad View or Azahar Secondary
+   * Window without raising it. Do not also uinput — on 4K `:1` that click
+   * hits the Cemu TV in the top-left quarter.
    *
-   * @param touch_port Viewport used to size the event (unused for 0–1 coords).
-   * @param touch Touch event in monitor-local `[0, 1]` coordinates.
+   * @param touch_port Display-1 touch port (`offset` + env size in pixels).
+   * @param touch Desktop-space coordinates from `prepare_absolute_pointer_data`.
    * @return True when the event was delivered to the touch surface.
    */
   bool inject_gamepad_view_touch(const touch_port_t &touch_port, const touch_input_t &touch);
@@ -273,9 +273,9 @@ namespace platf {
    * @brief Move the GamePad / Azahar-bottom pointer from a display-1 abs mouse packet.
    *
    * Fangoh Moonlight maps finger taps with `sendMousePositionOnDisplay(..., 1)`
-   * plus a later mouse-button packet that has no display index. Host uinput
-   * then clicks the raised TV at the last gamescope cursor (often center),
-   * which is why Wind Waker's item pad jumps to the middle of the GamePad.
+   * plus a later mouse-button packet that has no display index. Inject only
+   * XSendEvent + warp into GamePad View — a follow-up uinput click hits the
+   * raised 4K TV at 1080p GamePad coordinates (top-left quarter).
    *
    * @param touch_port Display-1 touch port (`offset` + env size in pixels).
    * @param x Desktop-space X from `client_to_touchport`.
@@ -324,8 +324,8 @@ namespace platf {
    * Display-1 GamePad inject does not see it. Host uinput does not reach Qt
    * on session `:1`.
    *
-   * @param touch_port Viewport used to size the event (unused for 0–1 coords).
-   * @param touch Touch event in monitor-local `[0, 1]` coordinates.
+   * @param touch_port Display-0 touch port (`offset` + env size in pixels).
+   * @param touch Desktop-space coordinates from `prepare_absolute_pointer_data`.
    * @return True when the event was delivered to the HDMI surface.
    */
   bool inject_hdmi_surface_touch(const touch_port_t &touch_port, const touch_input_t &touch);

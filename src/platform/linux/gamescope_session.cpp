@@ -874,9 +874,9 @@ namespace {
    * Host uinput is hit-tested by gamescope onto the top surface (Cemu TV).
    * `XSendEvent` with mask `0` is delivered to the client that created the
    * destination, so GamePad View still receives the click while stacked
-   * under the TV. `XWarpPointer` keeps `XQueryPointer` in sync — wx/GTK
-   * often ignore `send_event=True` and read the real cursor, which sits at
-   * screen center unless we warp.
+   * under the TV. `XWarpPointer` dest is that window (not the 4K nested
+   * root) so `XQueryPointer` stays in GamePad-local pixels. wx/GTK often
+   * ignore `send_event=True` and read the real cursor.
    *
    * @param dpy X11 display.
    * @param window Target window.
@@ -888,7 +888,10 @@ namespace {
    */
   void send_pointer(Display *dpy, Window window, int type, int x, int y, unsigned int state, unsigned int button) {
     const auto [rx, ry] = root_xy(dpy, window, x, y);
-    XWarpPointer(dpy, None, DefaultRootWindow(dpy), 0, 0, 0, 0, rx, ry);
+    // Dest is the GamePad/TV window, not the nested root. On a 4K :1 the
+    // GamePad is 1920×1080 at 0,0 — warping the root to those pixels puts
+    // XQueryPointer on the Cemu TV (full 3840×2160) in the top-left quarter.
+    XWarpPointer(dpy, None, window, 0, 0, 0, 0, x, y);
 
     XEvent event {};
     if (type == MotionNotify) {
@@ -1091,10 +1094,25 @@ namespace platf {
   }
 
   bool inject_gamepad_view_touch(const touch_port_t &touch_port, const touch_input_t &touch) {
-    (void) touch_port;
 #ifdef SUNSHINE_BUILD_X11
     if (!platf::gamescope::touch_is_second_display(touch.pointerId)) {
       return false;
+    }
+
+    // prepare_absolute_pointer_data yields desktop pixels, not [0, 1].
+    float nx = touch.x;
+    float ny = touch.y;
+    if (touch_port.width > 0 && touch_port.height > 0) {
+      const auto unit = platf::gamescope::abs_to_unit(
+        touch.x,
+        touch.y,
+        touch_port.offset_x,
+        touch_port.offset_y,
+        touch_port.width,
+        touch_port.height
+      );
+      nx = unit.first;
+      ny = unit.second;
     }
 
     std::scoped_lock lock {x11_lock};
@@ -1106,7 +1124,7 @@ namespace platf {
     switch (touch.eventType) {
       case LI_TOUCH_EVENT_CANCEL_ALL:
         if (pad_pointer_down) {
-          const auto ok = inject_unit(dpy, touch.x, touch.y, "touch-cancel"sv, ButtonRelease, Button1Mask, Button1);
+          const auto ok = inject_unit(dpy, nx, ny, "touch-cancel"sv, ButtonRelease, Button1Mask, Button1);
           pad_pointer_down = false;
           return ok;
         }
@@ -1115,17 +1133,17 @@ namespace platf {
       case LI_TOUCH_EVENT_CANCEL:
       case LI_TOUCH_EVENT_HOVER_LEAVE:
         pad_pointer_down = false;
-        return inject_unit(dpy, touch.x, touch.y, "touch-up"sv, ButtonRelease, Button1Mask, Button1);
+        return inject_unit(dpy, nx, ny, "touch-up"sv, ButtonRelease, Button1Mask, Button1);
       case LI_TOUCH_EVENT_DOWN:
-        if (!inject_unit(dpy, touch.x, touch.y, "touch-move"sv, MotionNotify, 0, 0)) {
+        if (!inject_unit(dpy, nx, ny, "touch-move"sv, MotionNotify, 0, 0)) {
           return false;
         }
         pad_pointer_down = true;
-        return inject_unit(dpy, touch.x, touch.y, "touch-down"sv, ButtonPress, 0, Button1);
+        return inject_unit(dpy, nx, ny, "touch-down"sv, ButtonPress, 0, Button1);
       case LI_TOUCH_EVENT_MOVE:
-        return inject_unit(dpy, touch.x, touch.y, "touch-drag"sv, MotionNotify, pad_pointer_down ? Button1Mask : 0, 0);
+        return inject_unit(dpy, nx, ny, "touch-drag"sv, MotionNotify, pad_pointer_down ? Button1Mask : 0, 0);
       case LI_TOUCH_EVENT_HOVER:
-        return inject_unit(dpy, touch.x, touch.y, "touch-hover"sv, MotionNotify, 0, 0);
+        return inject_unit(dpy, nx, ny, "touch-hover"sv, MotionNotify, 0, 0);
       default:
         return false;
     }
@@ -1284,10 +1302,24 @@ namespace platf {
   }
 
   bool inject_hdmi_surface_touch(const touch_port_t &touch_port, const touch_input_t &touch) {
-    (void) touch_port;
 #ifdef SUNSHINE_BUILD_X11
     if (platf::gamescope::touch_is_second_display(touch.pointerId)) {
       return false;
+    }
+
+    float nx = touch.x;
+    float ny = touch.y;
+    if (touch_port.width > 0 && touch_port.height > 0) {
+      const auto unit = platf::gamescope::abs_to_unit(
+        touch.x,
+        touch.y,
+        touch_port.offset_x,
+        touch_port.offset_y,
+        touch_port.width,
+        touch_port.height
+      );
+      nx = unit.first;
+      ny = unit.second;
     }
 
     std::scoped_lock lock {x11_lock};
@@ -1308,7 +1340,7 @@ namespace platf {
     switch (touch.eventType) {
       case LI_TOUCH_EVENT_CANCEL_ALL:
         if (hdmi_pointer_down) {
-          const auto ok = inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-cancel"sv, ButtonRelease, Button1Mask, Button1);
+          const auto ok = inject_hdmi_unit(dpy, frame, nx, ny, "touch-cancel"sv, ButtonRelease, Button1Mask, Button1);
           hdmi_pointer_down = false;
           return ok;
         }
@@ -1317,17 +1349,17 @@ namespace platf {
       case LI_TOUCH_EVENT_CANCEL:
       case LI_TOUCH_EVENT_HOVER_LEAVE:
         hdmi_pointer_down = false;
-        return inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-up"sv, ButtonRelease, Button1Mask, Button1);
+        return inject_hdmi_unit(dpy, frame, nx, ny, "touch-up"sv, ButtonRelease, Button1Mask, Button1);
       case LI_TOUCH_EVENT_DOWN:
-        if (!inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-move"sv, MotionNotify, 0, 0)) {
+        if (!inject_hdmi_unit(dpy, frame, nx, ny, "touch-move"sv, MotionNotify, 0, 0)) {
           return false;
         }
         hdmi_pointer_down = true;
-        return inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-down"sv, ButtonPress, 0, Button1);
+        return inject_hdmi_unit(dpy, frame, nx, ny, "touch-down"sv, ButtonPress, 0, Button1);
       case LI_TOUCH_EVENT_MOVE:
-        return inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-drag"sv, MotionNotify, hdmi_pointer_down ? Button1Mask : 0, 0);
+        return inject_hdmi_unit(dpy, frame, nx, ny, "touch-drag"sv, MotionNotify, hdmi_pointer_down ? Button1Mask : 0, 0);
       case LI_TOUCH_EVENT_HOVER:
-        return inject_hdmi_unit(dpy, frame, touch.x, touch.y, "touch-hover"sv, MotionNotify, 0, 0);
+        return inject_hdmi_unit(dpy, frame, nx, ny, "touch-hover"sv, MotionNotify, 0, 0);
       default:
         return false;
     }

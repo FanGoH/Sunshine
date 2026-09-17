@@ -954,11 +954,14 @@ namespace input {
 #ifdef __linux__
     if (config::video.dual_display_source == "gamescope-virtual"sv &&
         platf::gamescope::abs_targets_gamepad_view(input->last_abs_display, input->primary_from_secondary)) {
-      // Warp + XSendEvent first. wx/GTK often ignores send_event, so still emit
-      // a real uinput click at the warped cursor (stacked TV/GamePad share it).
+      // XSendEvent + warp into GamePad View. Do not also uinput: gamescope
+      // hit-tests the Cemu TV on 4K :1, so a 1080p GamePad click lands in
+      // the TV's top-left quarter.
       static_cast<void>(platf::inject_gamepad_view_button(button, release));
-    } else if (config::video.dual_display_source == "gamescope-virtual"sv &&
-               platf::gamescope::abs_targets_hdmi_surface(input->last_abs_display, input->primary_from_secondary)) {
+      return;
+    }
+    if (config::video.dual_display_source == "gamescope-virtual"sv &&
+        platf::gamescope::abs_targets_hdmi_surface(input->last_abs_display, input->primary_from_secondary)) {
       static_cast<void>(platf::inject_hdmi_surface_button(button, release));
     }
 #endif
