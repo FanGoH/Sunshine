@@ -895,6 +895,32 @@ namespace input {
     auto height = (float) util::endian::big(packet->height);
 
     const auto encoded_index = util::endian::big(static_cast<std::uint16_t>(packet->unused));
+    input->last_abs_display = client_display_index(encoded_index).value_or(0);
+#ifdef __linux__
+    if (config::video.dual_display_source == "gamescope-virtual"sv &&
+        platf::gamescope::abs_targets_gamepad_view(input->last_abs_display, input->primary_from_secondary)) {
+      // GamePad capture *is* the stream. Do not run client_to_touchport
+      // (letterbox + HDMI env_logical) over a 1080×1240 Thor panel ref.
+      const auto unit = platf::gamescope::packet_to_unit(x, y, width, height);
+      static int pkt_logs = 48;
+      if (pkt_logs > 0) {
+        --pkt_logs;
+        BOOST_LOG(info) << "GamePad pkt x="sv << x << ',' << y
+                        << " ref="sv << width << 'x' << height
+                        << " unit="sv << unit.first << ',' << unit.second
+                        << " disp="sv << input->last_abs_display;
+      }
+      platf::touch_port_t pkt_port {
+        0,
+        0,
+        static_cast<int>(width),
+        static_cast<int>(height)
+      };
+      static_cast<void>(platf::inject_gamepad_view_abs_mouse(pkt_port, x, y));
+      return;
+    }
+#endif
+
     auto touch_port = active_touch_port(input, encoded_index);
     if (!touch_port) {
       return;
@@ -922,13 +948,7 @@ namespace input {
       touch_port_dim_y
     };
 
-    input->last_abs_display = client_display_index(encoded_index).value_or(0);
 #ifdef __linux__
-    if (config::video.dual_display_source == "gamescope-virtual"sv &&
-        platf::gamescope::abs_targets_gamepad_view(input->last_abs_display, input->primary_from_secondary)) {
-      static_cast<void>(platf::inject_gamepad_view_abs_mouse(abs_port, tpcoords->first, tpcoords->second));
-      return;
-    }
     if (config::video.dual_display_source == "gamescope-virtual"sv &&
         platf::gamescope::abs_targets_hdmi_surface(input->last_abs_display, input->primary_from_secondary)) {
       static_cast<void>(platf::inject_hdmi_surface_abs_mouse(abs_port, tpcoords->first, tpcoords->second));
@@ -963,6 +983,7 @@ namespace input {
     if (config::video.dual_display_source == "gamescope-virtual"sv &&
         platf::gamescope::abs_targets_hdmi_surface(input->last_abs_display, input->primary_from_secondary)) {
       static_cast<void>(platf::inject_hdmi_surface_button(button, release));
+      return;
     }
 #endif
     platf::button_mouse(platf_input, button, release);

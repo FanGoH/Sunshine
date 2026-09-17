@@ -65,6 +65,17 @@ TEST(GamescopeSessionTest, MapsAbsoluteMousePixelsOntoUnitSquare) {
   EXPECT_EQ(platf::gamescope::abs_to_unit(100.0F, 100.0F, 0, 0, 0, 0), std::make_pair(0.0F, 0.0F));
 }
 
+TEST(GamescopeSessionTest, MapsGamepadPacketOntoUnitSquareWithoutLetterbox) {
+  // Moonlight sends width-1 / height-1. A Thor panel ref must not shear.
+  const auto center_1080 = platf::gamescope::packet_to_unit(540.0F, 620.0F, 1079.0F, 1239.0F);
+  EXPECT_NEAR(center_1080.first, 540.0F / 1079.0F, 0.0001F);
+  EXPECT_NEAR(center_1080.second, 620.0F / 1239.0F, 0.0001F);
+  const auto center_stream = platf::gamescope::packet_to_unit(960.0F, 540.0F, 1919.0F, 1079.0F);
+  EXPECT_NEAR(center_stream.first, 960.0F / 1919.0F, 0.0001F);
+  EXPECT_NEAR(center_stream.second, 540.0F / 1079.0F, 0.0001F);
+  EXPECT_EQ(platf::gamescope::packet_to_unit(100.0F, 100.0F, 0.0F, 1080.0F), std::make_pair(0.0F, 0.0F));
+}
+
 TEST(GamescopeSessionTest, AbsoluteMousePixelsAreNotClampedAsUnitCoords) {
   // Passing desktop pixels through touch_to_window_xy would clamp 400 to 1.0.
   const auto unit = platf::gamescope::abs_to_unit(384.0F, 216.0F, 0, 0, 1920, 1080);

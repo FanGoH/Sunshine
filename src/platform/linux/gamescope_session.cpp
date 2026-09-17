@@ -104,6 +104,13 @@ namespace platf::gamescope {
     return {nx, ny};
   }
 
+  std::pair<float, float> packet_to_unit(float x, float y, float width, float height) {
+    if (width <= 0.0F || height <= 0.0F) {
+      return {0.0F, 0.0F};
+    }
+    return {x / width, y / height};
+  }
+
   const char *session_x11_name() {
     return ":0";
   }
@@ -858,7 +865,7 @@ namespace {
    * @param height Target height.
    */
   void log_gamepad_pointer(std::string_view kind, float nx, float ny, int x, int y, Window window, int width, int height) {
-    static int remaining = 12;
+    static int remaining = 48;
     if (remaining <= 0) {
       return;
     }

@@ -115,6 +115,23 @@ namespace platf::gamescope {
   [[nodiscard]] std::pair<float, float> abs_to_unit(float x, float y, int offset_x, int offset_y, int width, int height);
 
   /**
+   * @brief Normalize a Moonlight abs-mouse packet onto the GamePad stream.
+   *
+   * video/1 is the GamePad capture. Use the packet's own reference rectangle
+   * (`LiSendMousePositionEventOnDisplay` width/height, already minus one)
+   * instead of `client_to_touchport` (encode letterbox + HDMI env_logical).
+   * Thor's bottom panel is 1080×1240; sending that as the reference while
+   * the host port is 1920×1080 shears the tap.
+   *
+   * @param x Packet X.
+   * @param y Packet Y.
+   * @param width Packet reference width (must be > 0).
+   * @param height Packet reference height (must be > 0).
+   * @return Unit coordinates for `touch_to_window_xy`.
+   */
+  [[nodiscard]] std::pair<float, float> packet_to_unit(float x, float y, float width, float height);
+
+  /**
    * @brief X11 display name for Steam Big Picture / overlay atoms.
    *
    * Session gamescope `--xwayland-count 2` keeps Steam on `:0`. Cemu uses
