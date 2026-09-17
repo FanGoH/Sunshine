@@ -66,14 +66,28 @@ TEST(GamescopeSessionTest, MapsAbsoluteMousePixelsOntoUnitSquare) {
 }
 
 TEST(GamescopeSessionTest, MapsGamepadPacketOntoUnitSquareWithoutLetterbox) {
-  // Moonlight sends width-1 / height-1. A Thor panel ref must not shear.
-  const auto center_1080 = platf::gamescope::packet_to_unit(540.0F, 620.0F, 1079.0F, 1239.0F);
-  EXPECT_NEAR(center_1080.first, 540.0F / 1079.0F, 0.0001F);
-  EXPECT_NEAR(center_1080.second, 620.0F / 1239.0F, 0.0001F);
+  // Stream-sized ref (new Moonlight) is already 16:9 — no letterbox undo.
   const auto center_stream = platf::gamescope::packet_to_unit(960.0F, 540.0F, 1919.0F, 1079.0F);
   EXPECT_NEAR(center_stream.first, 960.0F / 1919.0F, 0.0001F);
   EXPECT_NEAR(center_stream.second, 540.0F / 1079.0F, 0.0001F);
   EXPECT_EQ(platf::gamescope::packet_to_unit(100.0F, 100.0F, 0.0F, 1080.0F), std::make_pair(0.0F, 0.0F));
+}
+
+TEST(GamescopeSessionTest, UnletterboxesThorPanelRefOntoSixteenByNine) {
+  // Live Thor packet: ref=1239x1079 (1240×1080 panel). 16:9 content is
+  // 1239×697 with a 191px top/bottom bar. y=188 is the visible top.
+  constexpr float kW = 1239.0F;
+  constexpr float kH = 1079.0F;
+  constexpr float kContentH = kW * 9.0F / 16.0F;
+  constexpr float kOffY = (kH - kContentH) * 0.5F;
+  const auto top = platf::gamescope::packet_to_unit(kW * 0.5F, kOffY, kW, kH);
+  EXPECT_NEAR(top.first, 0.5F, 0.002F);
+  EXPECT_NEAR(top.second, 0.0F, 0.002F);
+  const auto mid = platf::gamescope::packet_to_unit(kW * 0.5F, kOffY + kContentH * 0.5F, kW, kH);
+  EXPECT_NEAR(mid.first, 0.5F, 0.002F);
+  EXPECT_NEAR(mid.second, 0.5F, 0.002F);
+  const auto visible_top = platf::gamescope::packet_to_unit(29.0F, 188.0F, kW, kH);
+  EXPECT_NEAR(visible_top.second, 0.0F, 0.02F);
 }
 
 TEST(GamescopeSessionTest, AbsoluteMousePixelsAreNotClampedAsUnitCoords) {

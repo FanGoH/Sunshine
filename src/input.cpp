@@ -910,13 +910,8 @@ namespace input {
                         << " unit="sv << unit.first << ',' << unit.second
                         << " disp="sv << input->last_abs_display;
       }
-      platf::touch_port_t pkt_port {
-        0,
-        0,
-        static_cast<int>(width),
-        static_cast<int>(height)
-      };
-      static_cast<void>(platf::inject_gamepad_view_abs_mouse(pkt_port, x, y));
+      platf::touch_port_t unit_port {0, 0, 1, 1};
+      static_cast<void>(platf::inject_gamepad_view_abs_mouse(unit_port, unit.first, unit.second));
       return;
     }
 #endif

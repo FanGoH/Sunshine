@@ -115,13 +115,13 @@ namespace platf::gamescope {
   [[nodiscard]] std::pair<float, float> abs_to_unit(float x, float y, int offset_x, int offset_y, int width, int height);
 
   /**
-   * @brief Normalize a Moonlight abs-mouse packet onto the GamePad stream.
+   * @brief Normalize a Moonlight abs-mouse packet onto the 16:9 GamePad stream.
    *
-   * video/1 is the GamePad capture. Use the packet's own reference rectangle
-   * (`LiSendMousePositionEventOnDisplay` width/height, already minus one)
-   * instead of `client_to_touchport` (encode letterbox + HDMI env_logical).
-   * Thor's bottom panel is 1080×1240; sending that as the reference while
-   * the host port is 1920×1080 shears the tap.
+   * video/1 is 1920×1080. Thor's bottom panel is 1240×1080; the old client
+   * sends that as the abs-mouse reference. Linear `x/width` shears the 16:9
+   * image (a tap on the visible top lands near packet y=191, not 0). Undo
+   * the letterbox/pillarbox of 16:9 inside the packet rectangle. A packet
+   * that is already ~16:9 (new client, stream-sized ref) is a no-op.
    *
    * @param x Packet X.
    * @param y Packet Y.

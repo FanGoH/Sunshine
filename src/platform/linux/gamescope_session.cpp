@@ -108,7 +108,23 @@ namespace platf::gamescope {
     if (width <= 0.0F || height <= 0.0F) {
       return {0.0F, 0.0F};
     }
-    return {x / width, y / height};
+    // GamePad capture / Cemu pad window are 16:9. Thor's panel is 1240×1080.
+    constexpr float kStreamAspect = 16.0F / 9.0F;
+    const float view_aspect = width / height;
+    float content_w = width;
+    float content_h = height;
+    float off_x = 0.0F;
+    float off_y = 0.0F;
+    if (view_aspect + 0.05F < kStreamAspect) {
+      content_w = width;
+      content_h = width / kStreamAspect;
+      off_y = (height - content_h) * 0.5F;
+    } else if (view_aspect > kStreamAspect + 0.05F) {
+      content_h = height;
+      content_w = height * kStreamAspect;
+      off_x = (width - content_w) * 0.5F;
+    }
+    return {(x - off_x) / content_w, (y - off_y) / content_h};
   }
 
   const char *session_x11_name() {
@@ -904,7 +920,9 @@ namespace {
     if (type == MotionNotify) {
       event.xmotion.type = MotionNotify;
       event.xmotion.serial = 0;
-      event.xmotion.send_event = True;
+      // wx/GTK drop send_event=True and read XQueryPointer. gamescope keeps
+      // the real cursor on the 4K TV, so QueryPointer is the wrong surface.
+      event.xmotion.send_event = False;
       event.xmotion.display = dpy;
       event.xmotion.window = window;
       event.xmotion.root = DefaultRootWindow(dpy);
@@ -920,7 +938,7 @@ namespace {
     } else {
       event.xbutton.type = type;
       event.xbutton.serial = 0;
-      event.xbutton.send_event = True;
+      event.xbutton.send_event = False;
       event.xbutton.display = dpy;
       event.xbutton.window = window;
       event.xbutton.root = DefaultRootWindow(dpy);
