@@ -127,6 +127,11 @@ namespace platf::gamescope {
     return {(x - off_x) / content_w, (y - off_y) / content_h};
   }
 
+  focus_display_t focus_display_with_middle(focus_display_t current, std::uint32_t middle) {
+    current.nested = middle;
+    return current;
+  }
+
   const char *session_x11_name() {
     return ":0";
   }
@@ -437,6 +442,101 @@ namespace {
     const auto atom = XInternAtom(dpy, name, False);
     unsigned long stored = value;
     XChangeProperty(dpy, window, atom, XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<unsigned char *>(&stored), 1);
+  }
+
+  /**
+   * @brief Read a CARDINAL list (FOCUS_DISPLAY is three values).
+   *
+   * @param dpy X11 display.
+   * @param window Window or root.
+   * @param name Atom name.
+   * @param max_items Maximum values to return.
+   * @return Values when present.
+   */
+  std::optional<std::vector<std::uint32_t>> get_cardinals(Display *dpy, Window window, const char *name, unsigned long max_items) {
+    const auto atom = XInternAtom(dpy, name, True);
+    if (!atom || max_items == 0) {
+      return std::nullopt;
+    }
+    Atom actual = None;
+    int format = 0;
+    unsigned long nitems = 0;
+    unsigned long after = 0;
+    unsigned char *prop = nullptr;
+    if (XGetWindowProperty(dpy, window, atom, 0, static_cast<long>(max_items), False, XA_CARDINAL, &actual, &format, &nitems, &after, &prop) != Success || !prop || nitems < 1) {
+      if (prop) {
+        XFree(prop);
+      }
+      return std::nullopt;
+    }
+    std::vector<std::uint32_t> values;
+    values.reserve(nitems);
+    const auto *longs = reinterpret_cast<unsigned long *>(prop);
+    for (unsigned long i = 0; i < nitems; ++i) {
+      values.push_back(static_cast<std::uint32_t>(longs[i]));
+    }
+    XFree(prop);
+    return values;
+  }
+
+  /**
+   * @brief Replace a CARDINAL list.
+   *
+   * @param dpy X11 display.
+   * @param window Window or root.
+   * @param name Atom name.
+   * @param values Cardinals to store.
+   */
+  void set_cardinals(Display *dpy, Window window, const char *name, const std::vector<std::uint32_t> &values) {
+    const auto atom = XInternAtom(dpy, name, False);
+    std::vector<unsigned long> stored(values.begin(), values.end());
+    XChangeProperty(dpy, window, atom, XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<unsigned char *>(stored.data()), static_cast<int>(stored.size()));
+  }
+
+  bool overlay_is_on(Display *dpy, Window bpm);
+  Window find_steam_overlay_window(Display *dpy);
+
+  /**
+   * @brief Route gamescope mouse/touch to nested `:1` while Cemu is playing.
+   *
+   * Steam / a kms restart can leave `GAMESCOPE_FOCUS_DISPLAY` at middle `0`.
+   * Cemu and GamePad View live on `:1`; XSendEvent then looks like dead taps.
+   * Keep the live first/third. Do not reclaim overlay, QAM, or Steam menus.
+   */
+  void ensure_nested_mouse_focus() {
+    auto *dpy = x11_display();
+    if (!dpy) {
+      return;
+    }
+    const auto root = DefaultRootWindow(dpy);
+    platf::gamescope::focus_display_t current;
+    if (const auto values = get_cardinals(dpy, root, "GAMESCOPE_FOCUS_DISPLAY", 3); values && values->size() >= 3) {
+      current.server = (*values)[0];
+      current.nested = (*values)[1];
+      current.token = (*values)[2];
+    }
+    const auto mouse = get_cardinals(dpy, root, "GAMESCOPE_MOUSE_FOCUS_DISPLAY", 3);
+    if (current.nested == 1 && mouse && mouse->size() >= 3 && (*mouse)[1] == 1) {
+      return;
+    }
+    const auto app = get_cardinal(dpy, root, "GAMESCOPE_FOCUSED_APP");
+    if (app && *app == platf::gamescope::STEAM_CLIENT_APPID) {
+      return;
+    }
+    const auto blur = get_cardinal(dpy, root, "GAMESCOPE_BLUR_MODE");
+    if (blur && *blur != 0) {
+      return;
+    }
+    const auto bpm = find_steam_overlay_window(dpy);
+    if (bpm != None && overlay_is_on(dpy, bpm)) {
+      return;
+    }
+
+    const auto want = platf::gamescope::focus_display_with_middle(current, 1);
+    const std::vector<std::uint32_t> tuple {want.server, want.nested, want.token};
+    set_cardinals(dpy, root, "GAMESCOPE_FOCUS_DISPLAY", tuple);
+    set_cardinals(dpy, root, "GAMESCOPE_KEYBOARD_FOCUS_DISPLAY", tuple);
+    set_cardinals(dpy, root, "GAMESCOPE_MOUSE_FOCUS_DISPLAY", tuple);
   }
 
   /**
@@ -898,8 +998,9 @@ namespace {
    * `XSendEvent` with mask `0` is delivered to the client that created the
    * destination, so GamePad View still receives the click while stacked
    * under the TV. `XWarpPointer` dest is that window (not the 4K nested
-   * root) so `XQueryPointer` stays in GamePad-local pixels. wx/GTK often
-   * ignore `send_event=True` and read the real cursor.
+   * root) so `XQueryPointer` stays in GamePad-local pixels. Restore
+   * `FOCUS_DISPLAY` middle `1` first — Steam / kms restart can leave it
+   * on `:0` and Cemu drops the events.
    *
    * @param dpy X11 display.
    * @param window Target window.
@@ -910,6 +1011,7 @@ namespace {
    * @param button Button number (`1` for left), or `0` for motion.
    */
   void send_pointer(Display *dpy, Window window, int type, int x, int y, unsigned int state, unsigned int button) {
+    ensure_nested_mouse_focus();
     const auto [rx, ry] = root_xy(dpy, window, x, y);
     // Dest is the GamePad/TV window, not the nested root. On a 4K :1 the
     // GamePad is 1920×1080 at 0,0 — warping the root to those pixels puts
@@ -920,9 +1022,7 @@ namespace {
     if (type == MotionNotify) {
       event.xmotion.type = MotionNotify;
       event.xmotion.serial = 0;
-      // wx/GTK drop send_event=True and read XQueryPointer. gamescope keeps
-      // the real cursor on the 4K TV, so QueryPointer is the wrong surface.
-      event.xmotion.send_event = False;
+      event.xmotion.send_event = True;
       event.xmotion.display = dpy;
       event.xmotion.window = window;
       event.xmotion.root = DefaultRootWindow(dpy);
@@ -938,7 +1038,7 @@ namespace {
     } else {
       event.xbutton.type = type;
       event.xbutton.serial = 0;
-      event.xbutton.send_event = False;
+      event.xbutton.send_event = True;
       event.xbutton.display = dpy;
       event.xbutton.window = window;
       event.xbutton.root = DefaultRootWindow(dpy);

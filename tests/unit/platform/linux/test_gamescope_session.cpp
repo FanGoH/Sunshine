@@ -73,6 +73,18 @@ TEST(GamescopeSessionTest, MapsGamepadPacketOntoUnitSquareWithoutLetterbox) {
   EXPECT_EQ(platf::gamescope::packet_to_unit(100.0F, 100.0F, 0.0F, 1080.0F), std::make_pair(0.0F, 0.0F));
 }
 
+TEST(GamescopeSessionTest, RewritesFocusDisplayMiddleWithoutStaleIds) {
+  const auto live = platf::gamescope::focus_display_t {12602, 0, 68};
+  const auto nested = platf::gamescope::focus_display_with_middle(live, 1);
+  EXPECT_EQ(nested.server, 12602U);
+  EXPECT_EQ(nested.nested, 1U);
+  EXPECT_EQ(nested.token, 68U);
+  const auto steam = platf::gamescope::focus_display_with_middle(nested, 0);
+  EXPECT_EQ(steam.server, 12602U);
+  EXPECT_EQ(steam.nested, 0U);
+  EXPECT_EQ(steam.token, 68U);
+}
+
 TEST(GamescopeSessionTest, UnletterboxesThorPanelRefOntoSixteenByNine) {
   // Live Thor packet: ref=1239x1079 (1240×1080 panel). 16:9 content is
   // 1239×697 with a 191px top/bottom bar. y=188 is the visible top.

@@ -132,6 +132,30 @@ namespace platf::gamescope {
   [[nodiscard]] std::pair<float, float> packet_to_unit(float x, float y, float width, float height);
 
   /**
+   * @brief Gamescope `GAMESCOPE_FOCUS_DISPLAY` triple on session `:0`.
+   *
+   * First and third change across gamescope restarts. Middle is the nested
+   * Xwayland: `0` = Steam `:0`, `1` = Cemu / Azahar `:1`.
+   */
+  struct focus_display_t {
+    std::uint32_t server = 12346;  ///< Live gamescope server index.
+    std::uint32_t nested = 0;  ///< Nested Xwayland index.
+    std::uint32_t token = 66;  ///< Live gamescope token.
+  };
+
+  /**
+   * @brief Keep the live server/token and set the nested Xwayland index.
+   *
+   * Writing a stale first/third after gamescope moved them makes `:1` look
+   * dead (HDMI / GamePad taps do nothing).
+   *
+   * @param current Live triple (or the compile-time fallback).
+   * @param middle Nested index (`1` while Cemu is on `:1`).
+   * @return Triple to write to `GAMESCOPE_FOCUS_DISPLAY`.
+   */
+  [[nodiscard]] focus_display_t focus_display_with_middle(focus_display_t current, std::uint32_t middle);
+
+  /**
    * @brief X11 display name for Steam Big Picture / overlay atoms.
    *
    * Session gamescope `--xwayland-count 2` keeps Steam on `:0`. Cemu uses
