@@ -25,6 +25,7 @@
   #include <X11/Xatom.h>
   #include <X11/Xlib.h>
   #include <X11/Xutil.h>
+  #include <X11/extensions/XTest.h>
 #endif
 
 // local includes
@@ -537,6 +538,15 @@ namespace {
     set_cardinals(dpy, root, "GAMESCOPE_FOCUS_DISPLAY", tuple);
     set_cardinals(dpy, root, "GAMESCOPE_KEYBOARD_FOCUS_DISPLAY", tuple);
     set_cardinals(dpy, root, "GAMESCOPE_MOUSE_FOCUS_DISPLAY", tuple);
+    // GamePad inject talks to :1. Without this flush the :0 write sits in
+    // the Xlib buffer and Steam keeps middle 0.
+    XFlush(dpy);
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      BOOST_LOG(info) << "GamePad inject: FOCUS_DISPLAY middle 1 ("sv
+                      << want.server << ',' << want.nested << ',' << want.token << ')';
+    }
   }
 
   /**
@@ -1060,6 +1070,105 @@ namespace {
   }
 
   /**
+   * @brief Delete a window property if the atom exists.
+   *
+   * @param dpy X11 display.
+   * @param window Target window.
+   * @param name Atom name.
+   */
+  void delete_property(Display *dpy, Window window, const char *name) {
+    const auto atom = XInternAtom(dpy, name, True);
+    if (atom) {
+      XDeleteProperty(dpy, window, atom);
+    }
+  }
+
+  /**
+   * @brief True when this Xwayland has the XTEST extension.
+   *
+   * @param dpy X11 display.
+   * @return True when `XTestFake*` can inject real pointer events.
+   */
+  bool xtest_ready(Display *dpy) {
+    int event_base = 0;
+    int error_base = 0;
+    int major = 0;
+    int minor = 0;
+    return XTestQueryExtension(dpy, &event_base, &error_base, &major, &minor) == True;
+  }
+
+  /**
+   * @brief Make GamePad hittable for XTEST (overlay-tagged windows are skipped).
+   *
+   * @param dpy X11 display.
+   * @param pad GamePad View frame.
+   * @param target GL child (or the frame).
+   */
+  void expose_gamepad_hit(Display *dpy, Window pad, Window target) {
+    delete_property(dpy, pad, "GAMESCOPE_EXTERNAL_OVERLAY");
+    delete_property(dpy, pad, "_NET_WM_WINDOW_OPACITY");
+    if (target != pad) {
+      delete_property(dpy, target, "GAMESCOPE_EXTERNAL_OVERLAY");
+      delete_property(dpy, target, "_NET_WM_WINDOW_OPACITY");
+    }
+    XRaiseWindow(dpy, pad);
+    if (target != pad) {
+      XRaiseWindow(dpy, target);
+    }
+  }
+
+  /**
+   * @brief Hide GamePad from HDMI scanout again after XTEST.
+   *
+   * @param dpy X11 display.
+   * @param pad GamePad View frame.
+   * @param target GL child (or the frame).
+   */
+  void cover_gamepad_hit(Display *dpy, Window pad, Window target) {
+    set_cardinal(dpy, pad, "GAMESCOPE_EXTERNAL_OVERLAY", 1);
+    set_cardinal(dpy, pad, "_NET_WM_WINDOW_OPACITY", 0);
+    if (target != pad) {
+      set_cardinal(dpy, target, "GAMESCOPE_EXTERNAL_OVERLAY", 1);
+    }
+  }
+
+  /**
+   * @brief Deliver a real pointer event to GamePad View.
+   *
+   * wx/GTK drop `XSendEvent` (`send_event=True`). Overlay-tag + opacity 0
+   * also skip gamescope hit-test, so `XQueryPointer` stays on the 4K TV.
+   * Briefly un-hide the pad, `XTestFake*` (real events), then re-cover.
+   *
+   * @param dpy X11 display.
+   * @param pad GamePad View frame.
+   * @param window GL child.
+   * @param type `ButtonPress`, `ButtonRelease`, or `MotionNotify`.
+   * @param x Window-local X.
+   * @param y Window-local Y.
+   * @param button Button number, or `0` for motion.
+   * @param cover_after Re-apply overlay hide after this event.
+   */
+  void send_gamepad_pointer(Display *dpy, Window pad, Window window, int type, int x, int y, unsigned int button, bool cover_after) {
+    ensure_nested_mouse_focus();
+    expose_gamepad_hit(dpy, pad, window);
+    const auto [rx, ry] = root_xy(dpy, window, x, y);
+    XWarpPointer(dpy, None, window, 0, 0, 0, 0, x, y);
+    if (xtest_ready(dpy)) {
+      XTestFakeMotionEvent(dpy, DefaultScreen(dpy), rx, ry, CurrentTime);
+      if (type == ButtonPress) {
+        XTestFakeButtonEvent(dpy, button, True, CurrentTime);
+      } else if (type == ButtonRelease) {
+        XTestFakeButtonEvent(dpy, button, False, CurrentTime);
+      }
+    } else {
+      send_pointer(dpy, window, type, x, y, type == ButtonRelease ? Button1Mask : 0, button);
+    }
+    if (cover_after) {
+      cover_gamepad_hit(dpy, pad, window);
+    }
+  }
+
+  /**
    * @brief Resolve GamePad View, map unit coords, and send a pointer event.
    *
    * @param dpy X11 display.
@@ -1093,7 +1202,9 @@ namespace {
     last_pad_y = y;
     last_pad_xy_valid = true;
     log_gamepad_pointer(kind, nx, ny, x, y, target, attr.width, attr.height);
-    send_pointer(dpy, target, type, x, y, state, button);
+    (void) state;
+    const bool cover_after = type == ButtonRelease || (type == MotionNotify && !pad_pointer_down);
+    send_gamepad_pointer(dpy, pad, target, type, x, y, button, cover_after);
     XFlush(dpy);
     return true;
   }
@@ -1329,8 +1440,7 @@ namespace platf {
     const auto ny = attr.height > 1 ? static_cast<float>(last_pad_y) / static_cast<float>(attr.height - 1) : 0.0F;
     log_gamepad_pointer(release ? "button-up"sv : "button-down"sv, nx, ny, last_pad_x, last_pad_y, target, attr.width, attr.height);
     const auto type = release ? ButtonRelease : ButtonPress;
-    const unsigned int state = release ? Button1Mask : 0;
-    send_pointer(dpy, target, type, last_pad_x, last_pad_y, state, x_button);
+    send_gamepad_pointer(dpy, pad, target, type, last_pad_x, last_pad_y, x_button, release);
     pad_pointer_down = !release && x_button == Button1;
     XFlush(dpy);
     return true;
