@@ -133,26 +133,26 @@ Display-index-1 finger taps from Fangoh Moonlight are **absolute mouse**
 (`sendMousePositionOnDisplay(..., displayIndex=1)` plus a later button packet
 with no display index). Native `LiSendTouchEvent` is compiled out. Sunshine
 maps those packets onto Cemu **GamePad View** or Azahar **Secondary Window**
-on session gamescope (`:1` first, then `:0`; never headless `:2`):
-normalize desktop pixels, `XOpenDisplay(":1")` when Cemu used `FOCUS_DISPLAY=1`
-(Steam Big Picture stays on `:0`; kms unsets `$DISPLAY`, so
-`XOpenDisplay(nullptr)` was a silent no-op and `:0`-only missed GamePad View),
-`XWarpPointer` so `XQueryPointer`
-matches, then `XSendEvent` mask `0` to the GamePad / Azahar GL child. Overlay
-hide restores Cemu TV or Azahar **Primary Window**. The following
-mouse-button packet still goes to host uinput at that warped cursor — wx/GTK
-often ignore synthetic `send_event`. Host uinput abs-move on display 1 is
-skipped (wrong coordinate space). Odin **GamePad only** is display 0 with
-`x-ml-video[0].source=secondary` (`primary_from_secondary`); HDMI/TV taps stay
-display 0 without that flag and take the same warp/`XSendEvent` path onto
-Cemu TV / Azahar **Primary Window** (`:1` then `:0`). Host uinput abs-move
-on display 0 is skipped for the same `:1` wx/GTK reason. GamePad-only must
-not take the HDMI path. Checkpoint
-`checkpoint-2026-09-10-gamemode-gamepad-touch`. Live 2026-09-10 17:34 dual-stream:
-`HDMI inject: using :1` onto Cemu TV GL child (`1920×1051`) and
-`GamePad inject: using :1` onto GamePad GL child (`1920×1080`). Hold-Select
-overlay (`STEAM_OVERLAY=1`) must warp Steam Big Picture on `:0`
-(`HDMI inject: overlay on :0` / `overlay-abs`), not Cemu TV. Do not raise GamePad over TV.
+on session gamescope (`:1` first, then `:0`; never headless `:2`).
+`packet_to_unit` is linear `x/width` — Thor Stretch fills 1240×1080 and the
+old client sends `ref=1239x1079` (protocol stores width−1). Do **not**
+unletterbox Fit bars (that sheared Y). Fit already shrinks StreamView to 16:9.
+A stream-sized ref (newer Moonlight) is the same linear map. Do not run
+`client_to_touchport`. wx/GTK drop `XSendEvent` (`send_event` is always True
+on the wire). Overlay-tag + opacity 0 also skip gamescope hit-test, so
+briefly clear those tags, `XTestFakeMotionEvent` / `XTestFakeButtonEvent` onto
+the GL child, then re-cover. `GAMESCOPE_FOCUS_DISPLAY` writes go to session
+`:0` and must `XFlush` that connection (GamePad Xlib talks to `:1`). Middle
+must stay **1** while Cemu is on `:1`. Do not also uinput. Overlay hide
+restores Cemu TV or Azahar **Primary Window**. Odin **GamePad only** is
+display 0 with `x-ml-video[0].source=secondary` (`primary_from_secondary`);
+HDMI/TV taps stay display 0 without that flag. GamePad-only must not take
+the HDMI path. **THE Game Mode standard is `checkpoint-2026-09-18-gamepad-xtest`**
+(user: “WE DID IT”; host `4ca50111`). Live: `GamePad pkt x=165,332
+ref=1239x1079 unit=0.133,0.308` then `abs` / `button-down` on the 1920×1080
+GL child. Hold-Select overlay (`STEAM_OVERLAY=1`) must warp Steam Big Picture
+on `:0` (`HDMI inject: overlay on :0` / `overlay-abs`), not Cemu TV. Do not
+raise GamePad over TV.
 
 ## Behavior without a supported source
 
