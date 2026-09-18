@@ -115,13 +115,13 @@ namespace platf::gamescope {
   [[nodiscard]] std::pair<float, float> abs_to_unit(float x, float y, int offset_x, int offset_y, int width, int height);
 
   /**
-   * @brief Normalize a Moonlight abs-mouse packet onto the 16:9 GamePad stream.
+   * @brief Normalize a Moonlight abs-mouse packet onto the GamePad stream.
    *
-   * video/1 is 1920×1080. Thor's bottom panel is 1240×1080; the old client
-   * sends that as the abs-mouse reference. Linear `x/width` shears the 16:9
-   * image (a tap on the visible top lands near packet y=191, not 0). Undo
-   * the letterbox/pillarbox of 16:9 inside the packet rectangle. A packet
-   * that is already ~16:9 (new client, stream-sized ref) is a no-op.
+   * video/1 is 1920×1080. Thor Stretch fills a 1240×1080 panel; the old
+   * client sends that view as `ref=1239x1079`. Linear `x/width` is the
+   * stretch map. Do not unletterbox — Fit shrinks the StreamView to 16:9
+   * so those refs are already content-sized. A stream-sized ref (new
+   * client) is the same linear map.
    *
    * @param x Packet X.
    * @param y Packet Y.

@@ -109,23 +109,13 @@ namespace platf::gamescope {
     if (width <= 0.0F || height <= 0.0F) {
       return {0.0F, 0.0F};
     }
-    // GamePad capture / Cemu pad window are 16:9. Thor's panel is 1240×1080.
-    constexpr float kStreamAspect = 16.0F / 9.0F;
-    const float view_aspect = width / height;
-    float content_w = width;
-    float content_h = height;
-    float off_x = 0.0F;
-    float off_y = 0.0F;
-    if (view_aspect + 0.05F < kStreamAspect) {
-      content_w = width;
-      content_h = width / kStreamAspect;
-      off_y = (height - content_h) * 0.5F;
-    } else if (view_aspect > kStreamAspect + 0.05F) {
-      content_h = height;
-      content_w = height * kStreamAspect;
-      off_x = (width - content_w) * 0.5F;
-    }
-    return {(x - off_x) / content_w, (y - off_y) / content_h};
+    // Thor Stretch fills the 1240×1080 panel with the 1920×1080 stream
+    // (non-uniform). The old client sends that view as ref=1239x1079.
+    // Undo-letterbox assumed Fit bars and sheared Y (packet y=190 is 18%
+    // down the stretched image, not the 16:9 content top). Linear is
+    // correct for Stretch, for Fit (the StreamView is already 16:9), and
+    // for a stream-sized ref. Do not run client_to_touchport.
+    return {x / width, y / height};
   }
 
   focus_display_t focus_display_with_middle(focus_display_t current, std::uint32_t middle) {

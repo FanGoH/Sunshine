@@ -85,21 +85,17 @@ TEST(GamescopeSessionTest, RewritesFocusDisplayMiddleWithoutStaleIds) {
   EXPECT_EQ(steam.token, 68U);
 }
 
-TEST(GamescopeSessionTest, UnletterboxesThorPanelRefOntoSixteenByNine) {
-  // Live Thor packet: ref=1239x1079 (1240×1080 panel). 16:9 content is
-  // 1239×697 with a 191px top/bottom bar. y=188 is the visible top.
+TEST(GamescopeSessionTest, MapsThorStretchPanelRefLinearly) {
+  // Live Thor Stretch packet: ref=1239x1079. y=190 is 18% down the
+  // stretched 1920×1080 image, not a Fit letterbox bar.
   constexpr float kW = 1239.0F;
   constexpr float kH = 1079.0F;
-  constexpr float kContentH = kW * 9.0F / 16.0F;
-  constexpr float kOffY = (kH - kContentH) * 0.5F;
-  const auto top = platf::gamescope::packet_to_unit(kW * 0.5F, kOffY, kW, kH);
-  EXPECT_NEAR(top.first, 0.5F, 0.002F);
-  EXPECT_NEAR(top.second, 0.0F, 0.002F);
-  const auto mid = platf::gamescope::packet_to_unit(kW * 0.5F, kOffY + kContentH * 0.5F, kW, kH);
-  EXPECT_NEAR(mid.first, 0.5F, 0.002F);
-  EXPECT_NEAR(mid.second, 0.5F, 0.002F);
-  const auto visible_top = platf::gamescope::packet_to_unit(29.0F, 188.0F, kW, kH);
-  EXPECT_NEAR(visible_top.second, 0.0F, 0.02F);
+  const auto mid = platf::gamescope::packet_to_unit(kW * 0.5F, kH * 0.5F, kW, kH);
+  EXPECT_NEAR(mid.first, 0.5F, 0.0001F);
+  EXPECT_NEAR(mid.second, 0.5F, 0.0001F);
+  const auto near_top = platf::gamescope::packet_to_unit(70.0F, 190.0F, kW, kH);
+  EXPECT_NEAR(near_top.first, 70.0F / kW, 0.0001F);
+  EXPECT_NEAR(near_top.second, 190.0F / kH, 0.0001F);
 }
 
 TEST(GamescopeSessionTest, AbsoluteMousePixelsAreNotClampedAsUnitCoords) {
