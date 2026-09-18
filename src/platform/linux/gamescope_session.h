@@ -91,6 +91,19 @@ namespace platf::gamescope {
    */
   [[nodiscard]] bool hdmi_surface_uses_absolute_clicks(std::string_view title);
 
+  constexpr float HDMI_TRACKPAD_TAP_PX = 32.0F;  ///< Max client-space travel for an Eden trackpad tap-click.
+
+  /**
+   * @brief True when an Eden HDMI stroke should click instead of only moving.
+   *
+   * Moonlight holds LEFT for the whole finger contact. The trackpad path
+   * swallows that hold and clicks on lift only when travel is small.
+   *
+   * @param travel_px Accumulated client-space distance during the contact.
+   * @return True when `travel_px` is within `HDMI_TRACKPAD_TAP_PX`.
+   */
+  [[nodiscard]] bool hdmi_trackpad_is_tap(float travel_px);
+
   /**
    * @brief True when Azahar is one stacked window (no Separate Windows).
    *

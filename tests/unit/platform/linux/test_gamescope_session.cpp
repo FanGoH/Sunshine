@@ -59,6 +59,12 @@ TEST(GamescopeSessionTest, HdmiAbsoluteClicksForCemuAndAzaharNotEden) {
   EXPECT_FALSE(platf::gamescope::hdmi_surface_uses_absolute_clicks("eden"));
 }
 
+TEST(GamescopeSessionTest, HdmiTrackpadTapIsSmallTravelOnly) {
+  EXPECT_TRUE(platf::gamescope::hdmi_trackpad_is_tap(0.0F));
+  EXPECT_TRUE(platf::gamescope::hdmi_trackpad_is_tap(platf::gamescope::HDMI_TRACKPAD_TAP_PX));
+  EXPECT_FALSE(platf::gamescope::hdmi_trackpad_is_tap(platf::gamescope::HDMI_TRACKPAD_TAP_PX + 1.0F));
+}
+
 TEST(GamescopeSessionTest, MatchesAzaharTouchAndHdmiSurfaces) {
   constexpr auto kPrimary = "Azahar 2126.0 | SUPER MARIO 3D LAND | Primary Window";
   constexpr auto kSecondary = "Azahar 2126.0 | SUPER MARIO 3D LAND | Secondary Window";

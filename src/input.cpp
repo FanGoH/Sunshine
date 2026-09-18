@@ -305,6 +305,8 @@ namespace input {
         hdmi_trackpad_valid {},
         hdmi_trackpad_x {},
         hdmi_trackpad_y {},
+        hdmi_trackpad_contact {},
+        hdmi_trackpad_travel {},
         touch_state_mutex {},
         touch_ports {},
         active_touch_ids {},
@@ -334,6 +336,8 @@ namespace input {
     bool hdmi_trackpad_valid;  ///< True when HDMI abs packets can seed a relative trackpad delta.
     float hdmi_trackpad_x;  ///< Last HDMI client-space X for trackpad deltas.
     float hdmi_trackpad_y;  ///< Last HDMI client-space Y for trackpad deltas.
+    bool hdmi_trackpad_contact;  ///< True while Moonlight is holding LEFT for an HDMI finger.
+    float hdmi_trackpad_travel;  ///< Client-space distance during the current HDMI finger contact.
 
     std::mutex touch_state_mutex;  ///< Serializes touch-port teardown against incoming contacts.
     std::array<input::touch_port_t, CLIENT_DISPLAY_COUNT> touch_ports;  ///< Per-display coordinate bounds for absolute input.
@@ -762,6 +766,8 @@ namespace input {
     input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
     input->last_abs_display = 0;
     input->hdmi_trackpad_valid = false;
+    input->hdmi_trackpad_contact = false;
+    input->hdmi_trackpad_travel = 0.0F;
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
 
@@ -769,10 +775,11 @@ namespace input {
    * @brief Turn HDMI abs packets into relative mouse when the surface is Eden.
    *
    * Thor top is a Moonlight abs stream. Cemu/Azahar map that onto a TV-sized
-   * window. Eden does not — finger motion becomes `move_mouse` deltas, and a
-   * tap is `button_mouse` at the current cursor (trackpad). Reset the origin
-   * on lift so the next stroke does not jump. Scale 4K stream refs down to
-   * 1080p so one swipe is not twice as fast as the bottom panel.
+   * window. Eden does not — finger motion becomes `move_mouse` deltas. Moonlight
+   * holds LEFT for the whole contact; that hold is swallowed and a short
+   * stationary lift becomes a click. Reset the origin on lift so the next
+   * stroke does not jump. Scale 4K stream refs down to 1080p so one swipe is
+   * not twice as fast as the bottom panel.
    *
    * @param input Stream input that tracks the last HDMI client-space point.
    * @param x Client-surface X from the abs packet.
@@ -786,25 +793,82 @@ namespace input {
     }
     static int remaining = 12;
     if (input->hdmi_trackpad_valid) {
-      const int dx = static_cast<int>(std::lround(static_cast<double>(x - input->hdmi_trackpad_x) * static_cast<double>(scale)));
-      const int dy = static_cast<int>(std::lround(static_cast<double>(y - input->hdmi_trackpad_y) * static_cast<double>(scale)));
+      const auto raw_dx = x - input->hdmi_trackpad_x;
+      const auto raw_dy = y - input->hdmi_trackpad_y;
+      const int dx = static_cast<int>(std::lround(static_cast<double>(raw_dx) * static_cast<double>(scale)));
+      const int dy = static_cast<int>(std::lround(static_cast<double>(raw_dy) * static_cast<double>(scale)));
+      if (input->hdmi_trackpad_contact) {
+        input->hdmi_trackpad_travel += std::hypot(raw_dx, raw_dy);
+      }
       if (remaining > 0) {
         --remaining;
         BOOST_LOG(info) << "HDMI trackpad dx="sv << dx << ",dy="sv << dy
                         << " from="sv << input->hdmi_trackpad_x << ',' << input->hdmi_trackpad_y
-                        << " to="sv << x << ',' << y;
+                        << " to="sv << x << ',' << y
+                        << " travel="sv << input->hdmi_trackpad_travel;
       }
       if (dx != 0 || dy != 0) {
         platf::move_mouse(platf_input, dx, dy);
       }
-    } else if (remaining > 0) {
-      --remaining;
-      BOOST_LOG(info) << "HDMI trackpad origin x="sv << x << ',' << y
-                      << " ref_h="sv << height;
+    } else {
+      // Unstick a leftover LEFT hold from the previous abs-mouse drag.
+      platf::button_mouse(platf_input, BUTTON_LEFT, true);
+      if (remaining > 0) {
+        --remaining;
+        BOOST_LOG(info) << "HDMI trackpad origin x="sv << x << ',' << y
+                        << " ref_h="sv << height;
+      }
     }
     input->hdmi_trackpad_x = x;
     input->hdmi_trackpad_y = y;
     input->hdmi_trackpad_valid = true;
+  }
+
+  /**
+   * @brief Handle HDMI trackpad mouse buttons without holding a drag.
+   *
+   * @param input Stream input that tracks HDMI trackpad travel.
+   * @param button Moonlight mouse button.
+   * @param release True for button-up.
+   */
+  void emit_hdmi_trackpad_button(const std::shared_ptr<input_t> &input, int button, bool release) {
+#ifdef __linux__
+    static int remaining = 12;
+    if (button != BUTTON_LEFT) {
+      if (remaining > 0) {
+        --remaining;
+        BOOST_LOG(info) << "HDMI trackpad ignore button="sv << button
+                        << " release="sv << release;
+      }
+      return;
+    }
+    if (!release) {
+      platf::button_mouse(platf_input, BUTTON_LEFT, true);
+      input->hdmi_trackpad_contact = true;
+      input->hdmi_trackpad_travel = 0.0F;
+      if (remaining > 0) {
+        --remaining;
+        BOOST_LOG(info) << "HDMI trackpad finger-down (no hold)"sv;
+      }
+      return;
+    }
+    const auto tap = platf::gamescope::hdmi_trackpad_is_tap(input->hdmi_trackpad_travel);
+    if (remaining > 0) {
+      --remaining;
+      BOOST_LOG(info) << "HDMI trackpad finger-up travel="sv << input->hdmi_trackpad_travel
+                      << (tap ? " tap"sv : " swipe"sv);
+    }
+    if (tap) {
+      platf::button_mouse(platf_input, BUTTON_LEFT, false);
+      platf::button_mouse(platf_input, BUTTON_LEFT, true);
+    }
+    input->hdmi_trackpad_contact = false;
+    input->hdmi_trackpad_valid = false;
+    input->hdmi_trackpad_travel = 0.0F;
+#else
+    (void) input;
+    platf::button_mouse(platf_input, button, release);
+#endif
   }
 
   /**
@@ -951,6 +1015,8 @@ namespace input {
       // GamePad capture *is* the stream. Do not run client_to_touchport
       // (letterbox + HDMI env_logical) over a 1080×1240 Thor panel ref.
       input->hdmi_trackpad_valid = false;
+      input->hdmi_trackpad_contact = false;
+      input->hdmi_trackpad_travel = 0.0F;
       const auto unit = platf::gamescope::packet_to_unit(x, y, width, height);
       static int pkt_logs = 48;
       if (pkt_logs > 0) {
@@ -998,10 +1064,14 @@ namespace input {
         platf::gamescope::abs_targets_hdmi_surface(input->last_abs_display, input->primary_from_secondary)) {
       if (platf::inject_hdmi_surface_abs_mouse(abs_port, tpcoords->first, tpcoords->second)) {
         input->hdmi_trackpad_valid = false;
+        input->hdmi_trackpad_contact = false;
+        input->hdmi_trackpad_travel = 0.0F;
         return;
       }
       // Eden (and any HDMI surface without abs clicks): relative trackpad.
       // Do not platf::abs_mouse — that warps the 4K stream onto a 1024×576 window.
+      // Do not delay LEFT-up: Moonlight holds LEFT for the whole finger contact.
+      input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
       emit_hdmi_trackpad_move(input, x, y, height);
       return;
     }
@@ -1015,9 +1085,8 @@ namespace input {
    *
    * Mouse-button packets have no display index. Game Mode taps are absolute
    * mouse (display 1 = GamePad View, display 0 = Cemu TV / Azahar) then a
-   * bare left-click. Eden HDMI falls through to `button_mouse` (trackpad
-   * click at the current cursor). Host uinput does not reach wx/GTK on
-   * session `:1`.
+   * bare left-click. Eden HDMI swallows Moonlight's finger-hold and clicks
+   * only on a short tap. Host uinput does not reach wx/GTK on session `:1`.
    *
    * @param input Stream input that tracks the last absolute-mouse display.
    * @param button Moonlight mouse button.
@@ -1031,6 +1100,8 @@ namespace input {
       // hit-tests the Cemu TV on 4K :1, so a 1080p GamePad click lands in
       // the TV's top-left quarter.
       input->hdmi_trackpad_valid = false;
+      input->hdmi_trackpad_contact = false;
+      input->hdmi_trackpad_travel = 0.0F;
       static_cast<void>(platf::inject_gamepad_view_button(button, release));
       return;
     }
@@ -1039,10 +1110,7 @@ namespace input {
       if (platf::inject_hdmi_surface_button(button, release)) {
         return;
       }
-      platf::button_mouse(platf_input, button, release);
-      if (release) {
-        input->hdmi_trackpad_valid = false;
-      }
+      emit_hdmi_trackpad_button(input, button, release);
       return;
     }
 #endif

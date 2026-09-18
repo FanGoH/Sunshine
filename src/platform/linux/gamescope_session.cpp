@@ -109,6 +109,10 @@ namespace platf::gamescope {
     return title_is_hdmi_surface(title);
   }
 
+  bool hdmi_trackpad_is_tap(float travel_px) {
+    return travel_px <= HDMI_TRACKPAD_TAP_PX;
+  }
+
   std::pair<int, int> touch_to_window_xy(float x, float y, int width, int height) {
     if (width <= 0 || height <= 0) {
       return {0, 0};
