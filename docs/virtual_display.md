@@ -151,7 +151,9 @@ the HDMI path. **THE Game Mode standard is `checkpoint-2026-09-18-gamepad-xtest`
 (user: “WE DID IT”; host `4ca50111`). Live: `GamePad pkt x=165,332
 ref=1239x1079 unit=0.133,0.308` then `abs` / `button-down` on the 1920×1080
 GL child. Hold-Select overlay (`STEAM_OVERLAY=1`) must warp Steam Big Picture
-on `:0` (`HDMI inject: overlay on :0` / `overlay-abs`), not Cemu TV. Do not
+on `:0` (`HDMI inject: overlay on :0` / `overlay-abs`), not Cemu TV. HDMI
+display-0 game taps also match Eden (`Eden | v…` on `:1`). Qt drops
+`XSendEvent`, so Eden uses XTEST; Cemu TV / Azahar stay XSendEvent. Do not
 raise GamePad over TV.
 
 ## Behavior without a supported source

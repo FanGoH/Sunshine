@@ -70,10 +70,11 @@ namespace platf::gamescope {
    * Overlay hide restores this window as `GAMESCOPECTRL_BASELAYER_WINDOW`.
    * Azahar top screen is `Primary Window`. HDMI-only / RetroDECK Azahar is the
    * stacked library caption (`Azahar … | GAME` without Primary/Secondary).
-   * Do not match the touch surface.
+   * Eden Game Mode is `Eden | v…` (library or in-game). Do not match the
+   * touch surface.
    *
    * @param title Window title.
-   * @return True for Cemu TV, Azahar Primary Window, or stacked Azahar.
+   * @return True for Cemu TV, Eden, Azahar Primary Window, or stacked Azahar.
    */
   [[nodiscard]] bool title_is_hdmi_surface(std::string_view title);
 
@@ -84,6 +85,18 @@ namespace platf::gamescope {
    * @return True for RetroDECK / single-screen Azahar.
    */
   [[nodiscard]] bool title_is_azahar_stacked(std::string_view title);
+
+  /**
+   * @brief True when an X11 title is the Eden main / in-game window.
+   *
+   * Game Mode captions start with `Eden |` (`Eden | v0.2.1 | Clang …`).
+   * The 1×1 `eden` helper and `Qt Selection Owner for eden` are not HDMI
+   * targets.
+   *
+   * @param title Window title.
+   * @return True for the Eden library or game window.
+   */
+  [[nodiscard]] bool title_is_eden(std::string_view title);
 
   /**
    * @brief Map a normalized touch point onto a window in pixels.

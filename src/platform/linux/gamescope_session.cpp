@@ -68,6 +68,12 @@ namespace platf::gamescope {
     return true;
   }
 
+  bool title_is_eden(std::string_view title) {
+    // Live Game Mode titles: "Eden | v0.2.1 | Clang …" and the same with a
+    // game suffix. Do not match the 1×1 "eden" helper or Qt selection owner.
+    return title.size() >= 6 && title.substr(0, 6) == "Eden |";
+  }
+
   bool title_is_touch_surface(std::string_view title) {
     if (title_is_gamepad_view(title)) {
       return true;
@@ -80,6 +86,9 @@ namespace platf::gamescope {
       return false;
     }
     if (title_is_cemu_tv(title)) {
+      return true;
+    }
+    if (title_is_eden(title)) {
       return true;
     }
     if (title.find("Primary Window") != std::string_view::npos) {
@@ -235,7 +244,7 @@ namespace {
   Display *cached_pad_dpy = nullptr;  ///< Display that owns `cached_pad`.
   Window cached_pad = None;  ///< Last GamePad View / Azahar Secondary xid.
   Display *cached_hdmi_dpy = nullptr;  ///< Display that owns `cached_hdmi`.
-  Window cached_hdmi = None;  ///< Last Cemu TV / Azahar HDMI-surface xid.
+  Window cached_hdmi = None;  ///< Last Cemu TV / Azahar / Eden HDMI-surface xid.
   int last_hdmi_x = 0;  ///< Last TV-local pointer X (for mouse-button packets).
   int last_hdmi_y = 0;  ///< Last TV-local pointer Y (for mouse-button packets).
   bool last_hdmi_xy_valid = false;  ///< True after at least one display-0 motion.
@@ -854,7 +863,7 @@ namespace {
   }
 
   /**
-   * @brief Session Xwayland that currently has Cemu TV / Azahar Primary.
+   * @brief Session Xwayland that currently has Cemu TV / Azahar / Eden.
    *
    * Prefers `:1` (`FOCUS_DISPLAY=1`), then `:0`. Never `:2`.
    *
@@ -881,7 +890,7 @@ namespace {
     }
     static bool logged_missing = false;
     if (!logged_missing) {
-      BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Azahar window on :1 or :0"sv;
+      BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Azahar / Eden window on :1 or :0"sv;
       logged_missing = true;
     }
     return nullptr;
@@ -1057,6 +1066,41 @@ namespace {
     // A non-zero mask only reaches clients that selected it; the wx frame
     // often has not, and propagate walks parents rather than the GL child.
     XSendEvent(dpy, window, False, 0, &event);
+  }
+
+  bool xtest_ready(Display *dpy);
+
+  /**
+   * @brief Deliver a pointer event to the HDMI / TV game surface.
+   *
+   * Steam overlay stays `XSendEvent` (BPM accepts it). Qt Eden drops
+   * `send_event=True`, so those taps use XTEST like GamePad View. Cemu TV
+   * / Azahar keep the proven `XSendEvent` path.
+   *
+   * @param dpy X11 display.
+   * @param frame HDMI surface frame (Eden / Cemu TV / overlay).
+   * @param window Input target (GL/Qt child or the frame).
+   * @param type `ButtonPress`, `ButtonRelease`, or `MotionNotify`.
+   * @param x Window-local X.
+   * @param y Window-local Y.
+   * @param state Modifier / button mask (XSendEvent only).
+   * @param button Button number, or `0` for motion.
+   */
+  void send_hdmi_pointer(Display *dpy, Window frame, Window window, int type, int x, int y, unsigned int state, unsigned int button) {
+    const auto title = window_title(dpy, frame);
+    if (platf::gamescope::title_is_eden(title) && xtest_ready(dpy)) {
+      ensure_nested_mouse_focus();
+      const auto [rx, ry] = root_xy(dpy, window, x, y);
+      XWarpPointer(dpy, None, window, 0, 0, 0, 0, x, y);
+      XTestFakeMotionEvent(dpy, DefaultScreen(dpy), rx, ry, CurrentTime);
+      if (type == ButtonPress) {
+        XTestFakeButtonEvent(dpy, button, True, CurrentTime);
+      } else if (type == ButtonRelease) {
+        XTestFakeButtonEvent(dpy, button, False, CurrentTime);
+      }
+      return;
+    }
+    send_pointer(dpy, window, type, x, y, state, button);
   }
 
   /**
@@ -1242,7 +1286,7 @@ namespace {
     if (frame == None) {
       static bool logged_missing = false;
       if (!logged_missing) {
-        BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Steam overlay window on this Xwayland"sv;
+        BOOST_LOG(warning) << "HDMI inject: no Cemu TV / Eden / Steam overlay window on this Xwayland"sv;
         logged_missing = true;
       }
       return false;
@@ -1259,7 +1303,7 @@ namespace {
     last_hdmi_y = y;
     last_hdmi_xy_valid = true;
     log_hdmi_pointer(kind, nx, ny, x, y, target, attr.width, attr.height);
-    send_pointer(dpy, target, type, x, y, state, button);
+    send_hdmi_pointer(dpy, frame, target, type, x, y, state, button);
     XFlush(dpy);
     return true;
   }
@@ -1515,7 +1559,7 @@ namespace platf {
     log_hdmi_pointer(release ? "button-up"sv : "button-down"sv, nx, ny, last_hdmi_x, last_hdmi_y, target, attr.width, attr.height);
     const auto type = release ? ButtonRelease : ButtonPress;
     const unsigned int state = release ? Button1Mask : 0;
-    send_pointer(dpy, target, type, last_hdmi_x, last_hdmi_y, state, x_button);
+    send_hdmi_pointer(dpy, frame, target, type, last_hdmi_x, last_hdmi_y, state, x_button);
     hdmi_pointer_down = !release && x_button == Button1;
     XFlush(dpy);
     return true;

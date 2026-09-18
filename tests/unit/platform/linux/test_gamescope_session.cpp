@@ -31,6 +31,20 @@ TEST(GamescopeSessionTest, MatchesCemuTvAndSkipsHelper) {
   EXPECT_FALSE(platf::gamescope::title_is_cemu_tv("Cemu_relwithdebinfo"));
 }
 
+TEST(GamescopeSessionTest, MatchesEdenHdmiSurface) {
+  constexpr auto kLibrary = "Eden | v0.2.1 | Clang 22.1.6";
+  constexpr auto kGame = "Eden | v0.2.1 | Clang 22.1.6 | The Legend of Zelda: Tears of the Kingdom (64-bit) | 1.4.3 | RADV";
+  EXPECT_TRUE(platf::gamescope::title_is_eden(kLibrary));
+  EXPECT_TRUE(platf::gamescope::title_is_eden(kGame));
+  EXPECT_TRUE(platf::gamescope::title_is_hdmi_surface(kLibrary));
+  EXPECT_TRUE(platf::gamescope::title_is_hdmi_surface(kGame));
+  EXPECT_FALSE(platf::gamescope::title_is_eden("eden"));
+  EXPECT_FALSE(platf::gamescope::title_is_eden("Qt Selection Owner for eden"));
+  EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface("eden"));
+  EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface("Qt Selection Owner for eden"));
+  EXPECT_FALSE(platf::gamescope::title_is_touch_surface(kLibrary));
+}
+
 TEST(GamescopeSessionTest, MatchesAzaharTouchAndHdmiSurfaces) {
   constexpr auto kPrimary = "Azahar 2126.0 | SUPER MARIO 3D LAND | Primary Window";
   constexpr auto kSecondary = "Azahar 2126.0 | SUPER MARIO 3D LAND | Secondary Window";
