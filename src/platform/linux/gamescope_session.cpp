@@ -99,6 +99,16 @@ namespace platf::gamescope {
     return title_is_azahar_stacked(title);
   }
 
+  bool hdmi_surface_uses_absolute_clicks(std::string_view title) {
+    // Eden is still the HDMI BASELAYER restore target, but it is a small Qt
+    // window on a 4K nested :1. Mapping the full Thor top stream onto
+    // 1024×576 is wonky — those taps become a relative trackpad instead.
+    if (title_is_eden(title)) {
+      return false;
+    }
+    return title_is_hdmi_surface(title);
+  }
+
   std::pair<int, int> touch_to_window_xy(float x, float y, int width, int height) {
     if (width <= 0 || height <= 0) {
       return {0, 0};
@@ -1073,13 +1083,13 @@ namespace {
   /**
    * @brief Deliver a pointer event to the HDMI / TV game surface.
    *
-   * Steam overlay stays `XSendEvent` (BPM accepts it). Qt Eden drops
-   * `send_event=True`, so those taps use XTEST like GamePad View. Cemu TV
-   * / Azahar keep the proven `XSendEvent` path.
+   * Steam overlay stays `XSendEvent` (BPM accepts it). Cemu TV / Azahar
+   * keep the proven `XSendEvent` path. Eden HDMI is not this function —
+   * those taps are a relative trackpad via `move_mouse` / `button_mouse`.
    *
    * @param dpy X11 display.
-   * @param frame HDMI surface frame (Eden / Cemu TV / overlay).
-   * @param window Input target (GL/Qt child or the frame).
+   * @param frame HDMI surface frame (Cemu TV / Azahar / overlay).
+   * @param window Input target (GL child or the frame).
    * @param type `ButtonPress`, `ButtonRelease`, or `MotionNotify`.
    * @param x Window-local X.
    * @param y Window-local Y.
@@ -1087,19 +1097,7 @@ namespace {
    * @param button Button number, or `0` for motion.
    */
   void send_hdmi_pointer(Display *dpy, Window frame, Window window, int type, int x, int y, unsigned int state, unsigned int button) {
-    const auto title = window_title(dpy, frame);
-    if (platf::gamescope::title_is_eden(title) && xtest_ready(dpy)) {
-      ensure_nested_mouse_focus();
-      const auto [rx, ry] = root_xy(dpy, window, x, y);
-      XWarpPointer(dpy, None, window, 0, 0, 0, 0, x, y);
-      XTestFakeMotionEvent(dpy, DefaultScreen(dpy), rx, ry, CurrentTime);
-      if (type == ButtonPress) {
-        XTestFakeButtonEvent(dpy, button, True, CurrentTime);
-      } else if (type == ButtonRelease) {
-        XTestFakeButtonEvent(dpy, button, False, CurrentTime);
-      }
-      return;
-    }
+    (void) frame;
     send_pointer(dpy, window, type, x, y, state, button);
   }
 
@@ -1513,7 +1511,20 @@ namespace platf {
     if (!dpy) {
       return false;
     }
-    return inject_hdmi_unit(dpy, hdmi_surface_window(dpy), nx, ny, "abs"sv, MotionNotify, hdmi_pointer_down ? Button1Mask : 0, 0);
+    const auto frame = hdmi_surface_window(dpy);
+    if (frame == None) {
+      return false;
+    }
+    const auto title = window_title(dpy, frame);
+    if (!platf::gamescope::hdmi_surface_uses_absolute_clicks(title)) {
+      static bool logged_trackpad = false;
+      if (!logged_trackpad) {
+        BOOST_LOG(info) << "HDMI inject: trackpad (no abs clicks) for "sv << title;
+        logged_trackpad = true;
+      }
+      return false;
+    }
+    return inject_hdmi_unit(dpy, frame, nx, ny, "abs"sv, MotionNotify, hdmi_pointer_down ? Button1Mask : 0, 0);
 #else
     (void) touch_port;
     (void) x;
@@ -1545,6 +1556,9 @@ namespace platf {
       frame = dpy ? hdmi_surface_window(dpy) : None;
     }
     if (!dpy || frame == None) {
+      return false;
+    }
+    if (overlay == None && !platf::gamescope::hdmi_surface_uses_absolute_clicks(window_title(dpy, frame))) {
       return false;
     }
 
@@ -1603,6 +1617,9 @@ namespace platf {
       frame = dpy ? hdmi_surface_window(dpy) : None;
     }
     if (!dpy || frame == None) {
+      return false;
+    }
+    if (overlay == None && !platf::gamescope::hdmi_surface_uses_absolute_clicks(window_title(dpy, frame))) {
       return false;
     }
 

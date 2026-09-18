@@ -38,11 +38,25 @@ TEST(GamescopeSessionTest, MatchesEdenHdmiSurface) {
   EXPECT_TRUE(platf::gamescope::title_is_eden(kGame));
   EXPECT_TRUE(platf::gamescope::title_is_hdmi_surface(kLibrary));
   EXPECT_TRUE(platf::gamescope::title_is_hdmi_surface(kGame));
+  EXPECT_FALSE(platf::gamescope::hdmi_surface_uses_absolute_clicks(kLibrary));
+  EXPECT_FALSE(platf::gamescope::hdmi_surface_uses_absolute_clicks(kGame));
   EXPECT_FALSE(platf::gamescope::title_is_eden("eden"));
   EXPECT_FALSE(platf::gamescope::title_is_eden("Qt Selection Owner for eden"));
   EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface("eden"));
   EXPECT_FALSE(platf::gamescope::title_is_hdmi_surface("Qt Selection Owner for eden"));
   EXPECT_FALSE(platf::gamescope::title_is_touch_surface(kLibrary));
+}
+
+TEST(GamescopeSessionTest, HdmiAbsoluteClicksForCemuAndAzaharNotEden) {
+  constexpr auto kPrimary = "Azahar 2126.0 | SUPER MARIO 3D LAND | Primary Window";
+  constexpr auto kSecondary = "Azahar 2126.0 | SUPER MARIO 3D LAND | Secondary Window";
+  constexpr auto kLibrary = "Azahar 2126.0 | SUPER MARIO 3D LAND";
+  EXPECT_TRUE(platf::gamescope::hdmi_surface_uses_absolute_clicks("Cemu 2.6 - FPS: 30.00 [OpenGL] The Wind Waker HD"));
+  EXPECT_TRUE(platf::gamescope::hdmi_surface_uses_absolute_clicks(kPrimary));
+  EXPECT_TRUE(platf::gamescope::hdmi_surface_uses_absolute_clicks(kLibrary));
+  EXPECT_FALSE(platf::gamescope::hdmi_surface_uses_absolute_clicks(kSecondary));
+  EXPECT_FALSE(platf::gamescope::hdmi_surface_uses_absolute_clicks("GamePad View - FPS: 30.00"));
+  EXPECT_FALSE(platf::gamescope::hdmi_surface_uses_absolute_clicks("eden"));
 }
 
 TEST(GamescopeSessionTest, MatchesAzaharTouchAndHdmiSurfaces) {

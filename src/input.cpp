@@ -302,6 +302,9 @@ namespace input {
         mouse_left_button_timeout {},
         last_abs_display {},
         primary_from_secondary {},
+        hdmi_trackpad_valid {},
+        hdmi_trackpad_x {},
+        hdmi_trackpad_y {},
         touch_state_mutex {},
         touch_ports {},
         active_touch_ids {},
@@ -328,6 +331,9 @@ namespace input {
     thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;  ///< Mouse left button timeout.
     std::size_t last_abs_display;  ///< Last absolute-mouse display index (mouse buttons have none).
     bool primary_from_secondary;  ///< True when video/0 captures the GamePad display (Odin GamePad only).
+    bool hdmi_trackpad_valid;  ///< True when HDMI abs packets can seed a relative trackpad delta.
+    float hdmi_trackpad_x;  ///< Last HDMI client-space X for trackpad deltas.
+    float hdmi_trackpad_y;  ///< Last HDMI client-space Y for trackpad deltas.
 
     std::mutex touch_state_mutex;  ///< Serializes touch-port teardown against incoming contacts.
     std::array<input::touch_port_t, CLIENT_DISPLAY_COUNT> touch_ports;  ///< Per-display coordinate bounds for absolute input.
@@ -755,7 +761,50 @@ namespace input {
 
     input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
     input->last_abs_display = 0;
+    input->hdmi_trackpad_valid = false;
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
+  }
+
+  /**
+   * @brief Turn HDMI abs packets into relative mouse when the surface is Eden.
+   *
+   * Thor top is a Moonlight abs stream. Cemu/Azahar map that onto a TV-sized
+   * window. Eden does not — finger motion becomes `move_mouse` deltas, and a
+   * tap is `button_mouse` at the current cursor (trackpad). Reset the origin
+   * on lift so the next stroke does not jump. Scale 4K stream refs down to
+   * 1080p so one swipe is not twice as fast as the bottom panel.
+   *
+   * @param input Stream input that tracks the last HDMI client-space point.
+   * @param x Client-surface X from the abs packet.
+   * @param y Client-surface Y from the abs packet.
+   * @param height Client-surface height (`packet->height`).
+   */
+  void emit_hdmi_trackpad_move(const std::shared_ptr<input_t> &input, float x, float y, float height) {
+    float scale = 1.0F;
+    if (height > 1080.0F) {
+      scale = 1080.0F / height;
+    }
+    static int remaining = 12;
+    if (input->hdmi_trackpad_valid) {
+      const int dx = static_cast<int>(std::lround(static_cast<double>(x - input->hdmi_trackpad_x) * static_cast<double>(scale)));
+      const int dy = static_cast<int>(std::lround(static_cast<double>(y - input->hdmi_trackpad_y) * static_cast<double>(scale)));
+      if (remaining > 0) {
+        --remaining;
+        BOOST_LOG(info) << "HDMI trackpad dx="sv << dx << ",dy="sv << dy
+                        << " from="sv << input->hdmi_trackpad_x << ',' << input->hdmi_trackpad_y
+                        << " to="sv << x << ',' << y;
+      }
+      if (dx != 0 || dy != 0) {
+        platf::move_mouse(platf_input, dx, dy);
+      }
+    } else if (remaining > 0) {
+      --remaining;
+      BOOST_LOG(info) << "HDMI trackpad origin x="sv << x << ',' << y
+                      << " ref_h="sv << height;
+    }
+    input->hdmi_trackpad_x = x;
+    input->hdmi_trackpad_y = y;
+    input->hdmi_trackpad_valid = true;
   }
 
   /**
@@ -901,6 +950,7 @@ namespace input {
         platf::gamescope::abs_targets_gamepad_view(input->last_abs_display, input->primary_from_secondary)) {
       // GamePad capture *is* the stream. Do not run client_to_touchport
       // (letterbox + HDMI env_logical) over a 1080×1240 Thor panel ref.
+      input->hdmi_trackpad_valid = false;
       const auto unit = platf::gamescope::packet_to_unit(x, y, width, height);
       static int pkt_logs = 48;
       if (pkt_logs > 0) {
@@ -946,7 +996,13 @@ namespace input {
 #ifdef __linux__
     if (config::video.dual_display_source == "gamescope-virtual"sv &&
         platf::gamescope::abs_targets_hdmi_surface(input->last_abs_display, input->primary_from_secondary)) {
-      static_cast<void>(platf::inject_hdmi_surface_abs_mouse(abs_port, tpcoords->first, tpcoords->second));
+      if (platf::inject_hdmi_surface_abs_mouse(abs_port, tpcoords->first, tpcoords->second)) {
+        input->hdmi_trackpad_valid = false;
+        return;
+      }
+      // Eden (and any HDMI surface without abs clicks): relative trackpad.
+      // Do not platf::abs_mouse — that warps the 4K stream onto a 1024×576 window.
+      emit_hdmi_trackpad_move(input, x, y, height);
       return;
     }
 #endif
@@ -958,8 +1014,10 @@ namespace input {
    * @brief Emit a mouse button, diverting Game Mode clicks to the right window.
    *
    * Mouse-button packets have no display index. Game Mode taps are absolute
-   * mouse (display 1 = GamePad View, display 0 = Cemu TV) then a bare
-   * left-click. Host uinput does not reach wx/GTK on session `:1`.
+   * mouse (display 1 = GamePad View, display 0 = Cemu TV / Azahar) then a
+   * bare left-click. Eden HDMI falls through to `button_mouse` (trackpad
+   * click at the current cursor). Host uinput does not reach wx/GTK on
+   * session `:1`.
    *
    * @param input Stream input that tracks the last absolute-mouse display.
    * @param button Moonlight mouse button.
@@ -972,12 +1030,19 @@ namespace input {
       // XSendEvent + warp into GamePad View. Do not also uinput: gamescope
       // hit-tests the Cemu TV on 4K :1, so a 1080p GamePad click lands in
       // the TV's top-left quarter.
+      input->hdmi_trackpad_valid = false;
       static_cast<void>(platf::inject_gamepad_view_button(button, release));
       return;
     }
     if (config::video.dual_display_source == "gamescope-virtual"sv &&
         platf::gamescope::abs_targets_hdmi_surface(input->last_abs_display, input->primary_from_secondary)) {
-      static_cast<void>(platf::inject_hdmi_surface_button(button, release));
+      if (platf::inject_hdmi_surface_button(button, release)) {
+        return;
+      }
+      platf::button_mouse(platf_input, button, release);
+      if (release) {
+        input->hdmi_trackpad_valid = false;
+      }
       return;
     }
 #endif

@@ -79,6 +79,19 @@ namespace platf::gamescope {
   [[nodiscard]] bool title_is_hdmi_surface(std::string_view title);
 
   /**
+   * @brief True when display-0 abs mouse should warp/click the HDMI game window.
+   *
+   * Cemu TV and Azahar fill nested `:1`, so window-local abs lines up. Eden
+   * (`Eden | v…`) is a small Qt window on that 4K root — mapping the full
+   * HDMI stream onto it is wonky. Overlay hide still uses
+   * `title_is_hdmi_surface` so Eden stays the BASELAYER restore target.
+   *
+   * @param title Window title.
+   * @return True for Cemu TV / Azahar HDMI; false for Eden and non-HDMI titles.
+   */
+  [[nodiscard]] bool hdmi_surface_uses_absolute_clicks(std::string_view title);
+
+  /**
    * @brief True when Azahar is one stacked window (no Separate Windows).
    *
    * @param title Window title.
@@ -352,7 +365,8 @@ namespace platf {
    *
    * Host uinput does not reach wx/GTK on session `:1`. Display 1 already warps
    * GamePad View; display 0 needs the same for the HDMI surface. When Steam
-   * overlay is on, warp Big Picture on `:0` instead of Cemu TV. Do not use
+   * overlay is on, warp Big Picture on `:0` instead of Cemu TV. Eden returns
+   * false so the caller can emit a relative trackpad instead. Do not use
    * this for GamePad-only (`primary_from_secondary`).
    *
    * @param touch_port Display-0 touch port (`offset` + env size in pixels).
@@ -364,6 +378,9 @@ namespace platf {
 
   /**
    * @brief Click Cemu TV / Azahar Primary after a display-0 abs mouse move.
+   *
+   * Eden returns false so the caller can `button_mouse` at the trackpad
+   * cursor. Overlay / Cemu / Azahar stay window-local abs clicks.
    *
    * @param button Moonlight mouse button (`BUTTON_LEFT` is `1`, same as X11).
    * @param release True for button-up.
