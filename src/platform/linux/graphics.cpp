@@ -39,6 +39,11 @@ extern "C" {
  * @brief Macro for DRM FORMAT MOD INVALID.
  */
 #define DRM_FORMAT_MOD_INVALID fourcc_mod_code(0, ((1ULL << 56) - 1))
+/**
+ * @def DRM_FORMAT_MOD_LINEAR
+ * @brief Macro for DRM FORMAT MOD LINEAR (explicit linear layout).
+ */
+#define DRM_FORMAT_MOD_LINEAR 0ULL
 
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
   /**
@@ -618,7 +623,10 @@ namespace egl {
       attribs.emplace_back(plane_attr.pitch);
       attribs.emplace_back(surface.pitches[x]);
 
-      if (surface.modifier != DRM_FORMAT_MOD_INVALID) {
+      // Explicit DRM_FORMAT_MOD_LINEAR (0) makes Mesa eglCreateImage fail with
+      // EGL_BAD_PARAMETER (0x300C) on gamescope-virtual PipeWire DMA-BUFs.
+      // Omit modifiers so EGL assumes implicit linear (EGL_EXT_image_dma_buf_import).
+      if (surface.modifier != DRM_FORMAT_MOD_INVALID && surface.modifier != DRM_FORMAT_MOD_LINEAR) {
         attribs.emplace_back(plane_attr.lo);
         attribs.emplace_back(surface.modifier & 0xFFFFFFFF);
         attribs.emplace_back(plane_attr.hi);
@@ -638,19 +646,42 @@ namespace egl {
    * @return Imported RGB image, or empty when import fails.
    */
   std::optional<rgb_t> import_source(display_t::pointer egl_display, const surface_descriptor_t &xrgb) {
-    auto attribs = surface_descriptor_to_egl_attribs(xrgb);
-
-    rgb_t rgb {
-      egl_display,
-      eglCreateImage(egl_display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs.data()),
-      gl::tex_t::make(1)
+    EGLint last_egl_err = EGL_SUCCESS;
+    auto try_import = [&](const surface_descriptor_t &sd) -> std::optional<rgb_t> {
+      auto attribs = surface_descriptor_to_egl_attribs(sd);
+      rgb_t rgb {
+        egl_display,
+        eglCreateImage(egl_display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs.data()),
+        gl::tex_t::make(1)
+      };
+      if (!rgb->xrgb8) {
+        last_egl_err = eglGetError();
+        return std::nullopt;
+      }
+      return rgb;
     };
 
-    if (!rgb->xrgb8) {
-      BOOST_LOG(error) << "Couldn't import RGB Image: "sv << util::hex(eglGetError()).to_string_view();
+    auto rgb_opt = try_import(xrgb);
+    if (!rgb_opt && xrgb.modifier != DRM_FORMAT_MOD_INVALID) {
+      // Retry with implicit linear (no modifier attrs) for drivers that reject
+      // an explicit modifier they advertised over PipeWire.
+      auto fallback = xrgb;
+      fallback.modifier = DRM_FORMAT_MOD_INVALID;
+      rgb_opt = try_import(fallback);
+      if (rgb_opt) {
+        BOOST_LOG(warning) << "RGB DMA-BUF import succeeded after omitting modifier="sv
+                           << xrgb.modifier << " fourcc="sv << xrgb.fourcc;
+      }
+    }
+
+    if (!rgb_opt) {
+      BOOST_LOG(error) << "Couldn't import RGB Image: "sv << util::hex(last_egl_err).to_string_view()
+                       << " fourcc="sv << xrgb.fourcc << " modifier="sv << xrgb.modifier;
 
       return std::nullopt;
     }
+
+    rgb_t rgb = std::move(*rgb_opt);
 
     gl::ctx.BindTexture(GL_TEXTURE_2D, rgb->tex[0]);
     if (!gl::egl_image_target_texture_2d()) {
